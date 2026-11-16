@@ -10,8 +10,11 @@ and writes four JSON files ({rows, meta}) to the output directory:
   weken.json        one row per ISO week: running km, long run, strength sessions, minutes per sport
   vandaag.json      one row: today's readiness and the suggested session
 
+With --push-summary it also stores today's summary on the server, as one sample of the
+metric `dashboard_samenvatting` (POST /api/ingest), so the iPhone widget can read it.
+
 Usage:
-  python3 dashboard/build_data.py --out <dir> [--url https://<app>.vercel.app] [--days 120]
+  python3 dashboard/build_data.py --out <dir> [--url https://<app>.vercel.app] [--days 120] [--push-summary]
 
 Auth: sends `Authorization: Bearer $MCP_SECRET` when that variable is set. In a
 Claude cloud session the network proxy injects the header instead, so no secret
@@ -59,6 +62,21 @@ def health_sql(base_url: str, query: str):
     if result.get("isError"):
         raise RuntimeError(f"health_sql failed: {out[:500]}")
     return json.loads(out)
+
+
+def push_summary(base_url: str, summary: dict):
+    """Store the summary as one metric sample; extra fields land in metric_samples.extra."""
+    now = datetime.now(TZ)
+    point = {"date": now.strftime("%Y-%m-%d %H:%M:%S %z"), "qty": summary.get("herstel"), "source": "dashboard"}
+    point.update({k: v for k, v in summary.items() if k != "herstel"})
+    body = json.dumps({"data": {"metrics": [{"name": "dashboard_samenvatting", "units": "score", "data": [point]}]}}).encode()
+    headers = {"Content-Type": "application/json"}
+    secret = os.environ.get("MCP_SECRET")
+    if secret:
+        headers["Authorization"] = f"Bearer {secret}"
+    req = urllib.request.Request(base_url.rstrip("/") + "/api/ingest", data=body, headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        return json.loads(resp.read().decode())
 
 
 def num(v):
@@ -190,6 +208,7 @@ def main():
     ap.add_argument("--url", default=os.environ.get("HEALTH_URL", DEFAULT_URL))
     ap.add_argument("--days", type=int, default=120)
     ap.add_argument("--today", help="YYYY-MM-DD, defaults to today in Europe/Amsterdam")
+    ap.add_argument("--push-summary", action="store_true", help="store today's summary on the server for the widget")
     args = ap.parse_args()
 
     today = date.fromisoformat(args.today) if args.today else datetime.now(TZ).date()
@@ -451,6 +470,12 @@ def main():
     for name, rows in files.items():
         with open(os.path.join(args.out, f"{name}.json"), "w", encoding="utf-8") as f:
             json.dump({"rows": rows, "meta": meta}, f, ensure_ascii=False, allow_nan=False)
+    if args.push_summary:
+        wk = week_rows[-1] if week_rows else {}
+        summary = {k: today_row[0][k] for k in ("herstel", "status", "advies", "uitleg", "hrv", "hrv_basis", "rhr", "rhr_basis", "slaap_u", "acwr", "vo2max")}
+        summary.update({"datum": today.isoformat(), "week_km": wk.get("run_km"), "week_runs": wk.get("runs"),
+                        "week_kracht": wk.get("kracht_sessies"), "week_rustig_pct": wk.get("rustig_pct")})
+        print("summary:", json.dumps(push_summary(args.url, summary)))
     print(json.dumps({k: len(v) for k, v in files.items()} | {"hrmax": hr_max, "hrrust": hr_rest, "herstel": ready, "advies": titel}))
 
 

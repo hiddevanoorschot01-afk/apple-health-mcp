@@ -22,3 +22,10 @@ Assumptions: HR max = highest workout HR seen, HR rest = median resting HR; zone
 heart-rate reserve (Z1 <60%, Z2 60-70%, Z3 70-80%, Z4 80-90%, Z5 >90%); load = Banister TRIMP
 per minute; readiness = 60 ± HRV vs 28-day baseline, resting HR vs baseline, sleep vs 7.5 h,
 minus a penalty above ACWR 1.3.
+
+## iPhone widget
+
+`widget.js` is a [Scriptable](https://scriptable.app) home-screen widget. With
+`--push-summary`, `build_data.py` stores today's summary as one sample of the metric
+`dashboard_samenvatting` (via `/api/ingest`); the widget reads the latest one through
+`health_sql`. Fill in `SLEUTEL` (your `MCP_SECRET`) on the phone only — never commit it.
