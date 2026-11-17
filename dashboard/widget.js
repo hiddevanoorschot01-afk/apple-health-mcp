@@ -103,7 +103,7 @@ function bouwWidget(d, size) {
     w.addSpacer(2);
     const a = w.addText(d.advies || "–"); a.font = Font.semiboldSystemFont(13); a.textColor = tekst; a.lineLimit = 2; a.minimumScaleFactor = 0.7;
     w.addSpacer();
-    label(w, "Slaap " + nl(d.slaap_u, 1) + " u · HRV " + nl(d.hrv), 10, zacht);
+    label(w, "Slaap " + nl(d.slaap_u, 1) + " u (" + nl(d.slaapscore) + ") · HRV " + nl(d.hrv), 10, zacht);
     return w;
   }
 
@@ -124,6 +124,7 @@ function bouwWidget(d, size) {
   vital(vit, "HRV", nl(d.hrv) + " ms", size === "large" ? "normaal " + nl(d.hrv_basis) : null);
   vital(vit, "Rust-HR", nl(d.rhr) + " bpm", size === "large" ? "normaal " + nl(d.rhr_basis) : null);
   vital(vit, "Slaap", nl(d.slaap_u, 1) + " u", size === "large" ? "doel 7,5" : null);
+  vital(vit, "Slaapscore", nl(d.slaapscore), size === "large" ? "van 100" : null);
   if (size === "large") vital(vit, "VO₂max", nl(d.vo2max, 1), "ml/kg·min");
 
   w.addSpacer(8);

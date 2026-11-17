@@ -316,6 +316,11 @@ def main():
             rem = sum(num(x.get("rem")) or 0 for x in sl)
             core = sum(num(x.get("core")) or 0 for x in sl)
             awake = sum(num(x.get("awake")) or 0 for x in sl)
+        bed_min = None  # bedtime as minutes after 18:00, so 23:30 -> 330 and 00:30 -> 390
+        starts = [x.get("sleepStart") or x.get("inBedStart") for x in sl if x.get("sleepStart") or x.get("inBedStart")]
+        if starts:
+            st0 = local(parse_ts(min(starts)))
+            bed_min = ((st0.hour - 18) % 24) * 60 + st0.minute
         if b.get("vo2_max"):
             vo2_last = b["vo2_max"][-1]
         kj = sum(b.get("active_energy", []))
@@ -327,6 +332,7 @@ def main():
             "stappen": r(sum(b.get("step_count", [])), 0) if b.get("step_count") else None,
             "actief_kcal": r(kj / 4.184, 0) if kj else None,
             "belasting": r(load_by_day.get(d, 0.0), 0),
+            "_bed_min": bed_min,
         })
 
     def window(i, key, n):
@@ -362,6 +368,29 @@ def main():
             score -= (row["acwr"] - 1.3) * 40
         row["herstel"] = r(max(0, min(100, score)), 0) if parts >= 2 else None
         del row["hrv_sd_ln"]
+
+        # Sleep score (0-100), built like Apple's: duration 50, bedtime regularity 30, interruptions 20.
+        row.update({"slaapscore": None, "slaap_duur_pt": None, "slaap_bedtijd_pt": None, "slaap_onderbreking_pt": None,
+                    "bedtijd": None, "wakker_min": None})
+        if row["slaap_u"]:
+            clamp = lambda v: max(0.0, min(1.0, v))
+            duur = 50 * clamp((row["slaap_u"] - 4) / 3.5)
+            awake = (row["wakker_u"] or 0) * 60
+            onder = 20 * clamp(1 - max(0.0, awake - 10) / 50)
+            prev_beds = [daily[j]["_bed_min"] for j in range(max(0, i - 14), i) if daily[j]["_bed_min"] is not None]
+            bed = None
+            if row["_bed_min"] is not None:
+                bm = row["_bed_min"]
+                row["bedtijd"] = f"{(18 + bm // 60) % 24:02d}:{bm % 60:02d}"
+                if len(prev_beds) >= 3:
+                    dev = abs(bm - statistics.median(prev_beds))
+                    bed = 30 * clamp(1 - max(0, dev - 30) / 90)
+            total = duur + onder + bed if bed is not None else (duur + onder) / 70 * 100
+            row.update({"slaapscore": r(total, 0), "slaap_duur_pt": r(duur, 0), "slaap_onderbreking_pt": r(onder, 0),
+                        "slaap_bedtijd_pt": r(bed, 0), "wakker_min": r(awake, 0)})
+
+    for row in daily:
+        row.pop("_bed_min", None)
 
     # ---- weekly rows (ISO weeks, Monday)
     weeks = defaultdict(lambda: {"run_km": 0.0, "runs": 0, "lange_duurloop_km": 0.0, "kracht_sessies": 0,
@@ -458,6 +487,7 @@ def main():
         "rhr": t["rhr"] if t["rhr"] is not None else y.get("rhr"),
         "rhr_basis": t["rhr_basis"] or y.get("rhr_basis"),
         "slaap_u": t["slaap_u"] if t["slaap_u"] is not None else y.get("slaap_u"),
+        "slaapscore": t["slaapscore"] if t["slaapscore"] is not None else y.get("slaapscore"),
         "acwr": t["acwr"], "vo2max": t["vo2max_laatst"],
         "dagen_sinds_lange_loop": long_days, "dagen_sinds_harde_loop": hard_days,
         "dagen_sinds_kracht": str_days, "hrmax": r(hr_max, 0), "hrrust": r(hr_rest, 0),
@@ -478,7 +508,7 @@ def main():
             json.dump({"rows": rows, "meta": meta}, f, ensure_ascii=False, allow_nan=False)
     if args.push_summary:
         wk = week_rows[-1] if week_rows else {}
-        summary = {k: today_row[0][k] for k in ("herstel", "status", "advies", "uitleg", "hrv", "hrv_basis", "rhr", "rhr_basis", "slaap_u", "acwr", "vo2max")}
+        summary = {k: today_row[0][k] for k in ("herstel", "status", "advies", "uitleg", "hrv", "hrv_basis", "rhr", "rhr_basis", "slaap_u", "slaapscore", "acwr", "vo2max")}
         summary.update({"datum": data_datum.isoformat(), "vers": vers, "week_km": wk.get("run_km"), "week_runs": wk.get("runs"),
                         "week_kracht": wk.get("kracht_sessies"), "week_rustig_pct": wk.get("rustig_pct")})
         print("summary:", json.dumps(push_summary(args.url, summary)))
