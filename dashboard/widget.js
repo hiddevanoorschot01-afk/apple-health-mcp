@@ -10,6 +10,9 @@
 const SERVER = "https://apple-health-mcp-weld-iota.vercel.app";
 const SLEUTEL = "PLAK-HIER-JE-MCP_SECRET";
 const DASHBOARD = "https://claude.ai/artifact/KEHQuNifF2n9DmKmjoW9yA";
+// Name of this script in Scriptable; the refresh button runs it.
+const SCRIPT_NAAM = Script.name() || "Hybrid Training";
+const VERVERS_URL = "scriptable:///run/" + encodeURIComponent(SCRIPT_NAAM);
 
 const DOEL_KRACHT = 3, DOEL_RUNS = 3, DOEL_RUSTIG = 80;
 // Your Apple Watch ring goals (Activity app on your iPhone): change these to yours.
@@ -236,11 +239,6 @@ function ringenBlok(w, r, groot) {
   const rechts = rij.addStack(); rechts.layoutVertically();
   label(rechts, "Stappen", 9, zacht);
   label(rechts, Math.round(r.stappen).toLocaleString("nl-NL"), 13, tekst, "semi");
-  if (r.laatst) {
-    const t = new Date(String(r.laatst).replace(" ", "T").replace(/\+00$/, "+00:00"));
-    const df = new DateFormatter(); df.dateFormat = "HH:mm";
-    label(rechts, "live · " + df.string(t), 8, zacht);
-  }
 }
 
 function weekStrip(w, d) {
@@ -271,11 +269,22 @@ function dagInfo(w, d) {
 }
 
 function voet(w, d) {
-  const f = w.addStack();
-  const datum = (d.datum || "").split("-").reverse().slice(0, 2).join("-");
-  label(f, d.vers === false ? "⚠︎ Slaap van vannacht nog niet binnen" : "Data van " + datum, 8, d.vers === false ? kleur.oranje : zacht);
+  const f = w.addStack(); f.centerAlignContent();
+  const df = new DateFormatter(); df.dateFormat = "HH:mm";
+  if (d.vers === false) {
+    label(f, "⚠︎ Slaap van vannacht nog niet binnen", 8, kleur.oranje);
+  } else {
+    const sync = d.ringen && d.ringen.laatst ? df.string(new Date(String(d.ringen.laatst).replace(" ", "T").replace(/\+00$/, "+00:00"))) : "–";
+    label(f, "iPhone-sync " + sync + " · widget " + df.string(new Date()), 8, zacht);
+  }
   f.addSpacer();
-  label(f, "Tik voor dashboard", 8, zacht);
+  const knop = f.addStack(); knop.url = VERVERS_URL;
+  knop.backgroundColor = vlak; knop.cornerRadius = 6; knop.setPadding(2, 7, 2, 7);
+  label(knop, "↻ Ververs", 9, tekst, "semi");
+  f.addSpacer(6);
+  const naarDashboard = f.addStack(); naarDashboard.url = DASHBOARD;
+  naarDashboard.backgroundColor = vlak; naarDashboard.cornerRadius = 6; naarDashboard.setPadding(2, 7, 2, 7);
+  label(naarDashboard, "Dashboard ›", 9, tekst, "semi");
 }
 
 // ---------- widget sizes
@@ -306,6 +315,8 @@ function bouwWidget(d, size) {
     vitalsRij(w, d, false);
     w.addSpacer(6);
     if (d.ringen) ringenBlok(w, d.ringen, false); else weekBlok(w, d, 88);
+    w.addSpacer();
+    voet(w, d);
     return w;
   }
 
