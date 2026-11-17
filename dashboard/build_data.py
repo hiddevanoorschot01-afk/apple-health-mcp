@@ -13,8 +13,13 @@ and writes four JSON files ({rows, meta}) to the output directory:
 With --push-summary it also stores today's summary on the server, as one sample of the
 metric `dashboard_samenvatting` (POST /api/ingest), so the iPhone widget can read it.
 
+Optional personal settings come from a JSON profile (--profiel, kept out of this repo):
+fixed HR zones, HR max, morning status rules (sleeping HR, wrist temperature, breathing),
+races and nutrition phases. --sessie merges the day's chosen session into the widget summary.
+
 Usage:
-  python3 dashboard/build_data.py --out <dir> [--url https://<app>.vercel.app] [--days 120] [--push-summary]
+  python3 dashboard/build_data.py --out <dir> [--url https://<app>.vercel.app] [--days 120]
+      [--profiel profiel.json] [--sessie sessie.json] [--push-summary]
 
 Auth: sends `Authorization: Bearer $MCP_SECRET` when that variable is set. In a
 Claude cloud session the network proxy injects the header instead, so no secret
@@ -179,8 +184,11 @@ def dedupe(workouts):
     return sorted(kept, key=lambda w: w["start"])
 
 
-def zones_and_trimp(hr_points, hr_rest, hr_max, exclude=()):
-    """Per-minute HR samples -> minutes in 5 HR-reserve zones and Banister TRIMP."""
+def zones_and_trimp(hr_points, hr_rest, hr_max, exclude=(), zone_bounds=None):
+    """Per-minute HR samples -> minutes in 5 zones and Banister TRIMP.
+
+    zone_bounds: lower bpm bounds of Z2..Z5 (e.g. [135, 151, 165, 180]); otherwise
+    HR-reserve zones (60/70/80/90%)."""
     z = [0.0] * 5
     trimp = 0.0
     reserve = max(hr_max - hr_rest, 1)
@@ -193,7 +201,10 @@ def zones_and_trimp(hr_points, hr_rest, hr_max, exclude=()):
         if any(a <= t < b for a, b in exclude):
             continue
         frac = min(max((hr - hr_rest) / reserve, 0.0), 1.0)
-        idx = 0 if frac < 0.6 else 1 if frac < 0.7 else 2 if frac < 0.8 else 3 if frac < 0.9 else 4
+        if zone_bounds:
+            idx = sum(1 for b in zone_bounds if hr >= b)
+        else:
+            idx = 0 if frac < 0.6 else 1 if frac < 0.7 else 2 if frac < 0.8 else 3 if frac < 0.9 else 4
         z[idx] += 1
         trimp += frac * 0.64 * math.exp(1.92 * frac)
     return z, trimp
@@ -208,17 +219,26 @@ def main():
     ap.add_argument("--url", default=os.environ.get("HEALTH_URL", DEFAULT_URL))
     ap.add_argument("--days", type=int, default=120)
     ap.add_argument("--today", help="YYYY-MM-DD, defaults to today in Europe/Amsterdam")
+    ap.add_argument("--profiel", help="personal profile JSON (zones, status rules, races, nutrition phases)")
+    ap.add_argument("--sessie", help="JSON with the day's chosen session {titel, onderdelen, waarom}")
     ap.add_argument("--push-summary", action="store_true", help="store today's summary on the server for the widget")
     args = ap.parse_args()
 
     today = date.fromisoformat(args.today) if args.today else datetime.now(TZ).date()
+    prof = {}
+    if args.profiel:
+        with open(args.profiel, encoding="utf-8") as f:
+            prof = json.load(f)
+    zone_bounds = prof.get("zones_ondergrens")
     since = (today - timedelta(days=args.days)).isoformat()
 
     metrics = health_sql(args.url, f"""
         select metric_name, date, qty, avg, extra from metric_samples
         where date >= '{since}' and metric_name in (
           'heart_rate_variability','resting_heart_rate','sleep_analysis','vo2_max',
-          'active_energy','step_count','respiratory_rate','apple_sleeping_wrist_temperature')
+          'active_energy','step_count','respiratory_rate','apple_sleeping_wrist_temperature',
+          'heart_rate','dietary_energy','protein','weight_body_mass','body_mass','body_fat_percentage',
+          'waist_circumference')
         order by date""")
     raw_workouts = health_sql(args.url, f"""
         select id, name, start, "end", duration_s, distance, distance_units, avg_hr, max_hr,
@@ -231,6 +251,7 @@ def main():
 
     # ---- daily metrics (local day)
     by_day = defaultdict(lambda: defaultdict(list))
+    hr_hourly, resp_hourly = [], []
     for m in metrics:
         name = m["metric_name"]
         t = local(parse_ts(m["date"]))
@@ -247,12 +268,22 @@ def main():
             elif t.hour < 10:
                 by_day[t.date()]["hrv_night"].append(q)
             by_day[t.date()]["hrv_all"].append(q)
+        elif name == "heart_rate":
+            if q is not None:
+                hr_hourly.append((t, q))
+        elif name == "respiratory_rate":
+            if q is not None:
+                resp_hourly.append((t, q))
+                by_day[t.date()][name].append(q)
+        elif name == "apple_sleeping_wrist_temperature":
+            if q is not None:  # measured overnight; belongs to the morning it leads into
+                by_day[t.date() + timedelta(days=1) if t.hour >= 12 else t.date()]["pols_temp"].append(q)
         elif q is not None:
             by_day[t.date()][name].append(q)
 
     hr_rest_all = [v for d in by_day.values() for v in d.get("resting_heart_rate", []) if v]
     hr_rest = statistics.median(hr_rest_all) if hr_rest_all else 55.0
-    hr_max = max([num(w["max_hr"]) or 0 for w in raw_workouts] + [185.0])
+    hr_max = prof.get("hrmax") or max([num(w["max_hr"]) or 0 for w in raw_workouts] + [185.0])
 
     # ---- workouts
     ws = []
@@ -274,7 +305,7 @@ def main():
     workout_rows = []
     load_by_day = defaultdict(float)
     for w in ws:
-        z, trimp = zones_and_trimp(w["hr"], hr_rest, hr_max, w["exclude"])
+        z, trimp = zones_and_trimp(w["hr"], hr_rest, hr_max, w["exclude"], zone_bounds)
         minutes = w["duration_s"] / 60
         if not w["hr"] and w["avg_hr"]:  # no per-minute data: estimate from the average
             frac = min(max((w["avg_hr"] - hr_rest) / (hr_max - hr_rest), 0), 1)
@@ -321,6 +352,19 @@ def main():
         if starts:
             st0 = local(parse_ts(min(starts)))
             bed_min = ((st0.hour - 18) % 24) * 60 + st0.minute
+        # Sleeping heart rate and breathing: hourly averages inside last night's sleep window.
+        slaap_hr = adem = None
+        ends = [x.get("sleepEnd") or x.get("inBedEnd") for x in sl if x.get("sleepEnd") or x.get("inBedEnd")]
+        if starts and ends:
+            s0, s1 = parse_ts(min(starts)), parse_ts(max(ends))
+            # Only hours that lie fully inside the sleep window; the median keeps a restless hour from dominating.
+            hv = [v for (tt, v) in hr_hourly if s0 <= tt and tt + timedelta(hours=1) <= s1]
+            rv = [v for (tt, v) in resp_hourly if s0 <= tt and tt + timedelta(hours=1) <= s1]
+            slaap_hr = statistics.median(hv) if hv else None
+            adem = statistics.median(rv) if rv else None
+        temp = b["pols_temp"][-1] if b.get("pols_temp") else None
+        weight = (b.get("weight_body_mass") or b.get("body_mass") or [None])[-1]
+        fase = next((f for f in prof.get("voeding_fases", []) if f["van"] <= d.isoformat() <= f["tot"]), None)
         if b.get("vo2_max"):
             vo2_last = b["vo2_max"][-1]
         kj = sum(b.get("active_energy", []))
@@ -333,6 +377,12 @@ def main():
             "actief_kcal": r(kj / 4.184, 0) if kj else None,
             "belasting": r(load_by_day.get(d, 0.0), 0),
             "_bed_min": bed_min,
+            "slaap_hr": r(slaap_hr), "adem": r(adem), "pols_temp": r(temp, 2),
+            "kcal": r(sum(b["dietary_energy"]) / 4.184, 0) if b.get("dietary_energy") else None,
+            "eiwit_g": r(sum(b["protein"]), 0) if b.get("protein") else None,
+            "kcal_doel": fase["kcal"] if fase else None, "eiwit_doel": fase["eiwit"] if fase else None,
+            "voedingsfase": fase["naam"] if fase else None,
+            "gewicht_kg": r(weight, 1),
         })
 
     def window(i, key, n):
@@ -388,6 +438,33 @@ def main():
             total = duur + onder + bed if bed is not None else (duur + onder) / 70 * 100
             row.update({"slaapscore": r(total, 0), "slaap_duur_pt": r(duur, 0), "slaap_onderbreking_pt": r(onder, 0),
                         "slaap_bedtijd_pt": r(bed, 0), "wakker_min": r(awake, 0)})
+
+        # Morning status from the profile's rules (green / orange / red).
+        temps = [daily[j]["pols_temp"] for j in range(max(0, i - 28), i) if daily[j]["pols_temp"] is not None]
+        adems = [daily[j]["adem"] for j in range(max(0, i - 28), i) if daily[j]["adem"] is not None]
+        row["temp_afwijking"] = r(row["pols_temp"] - statistics.mean(temps), 2) if row["pols_temp"] is not None and len(temps) >= 5 else None
+        row["adem_basis"] = r(statistics.mean(adems)) if len(adems) >= 5 else None
+        redenen = []
+        hr_hi = prof.get("slaaphr_rood_min", 50)
+        if row["slaap_hr"] is not None and row["slaap_hr"] >= hr_hi:
+            redenen.append(f"slaaphartslag {row['slaap_hr']:.0f}")
+        if row["temp_afwijking"] is not None and row["temp_afwijking"] >= prof.get("temp_rood_afwijking", 0.5):
+            redenen.append(f"polstemperatuur +{row['temp_afwijking']:.1f} °C")
+        if row["adem"] is not None and row["adem_basis"] is not None and row["adem"] - row["adem_basis"] >= prof.get("adem_rood_afwijking", 1.5):
+            redenen.append(f"ademhaling {row['adem']:.1f}/min")
+        if redenen:
+            row["status"] = "rood"
+        elif row["herstel"] is None:
+            row["status"] = None
+        elif ((row["slaap_hr"] is None or row["slaap_hr"] <= prof.get("slaaphr_groen_max", 45))
+              and (row["slaap_u"] or 0) >= prof.get("slaap_groen_min", 7.0) and row["herstel"] >= 55):
+            row["status"] = "groen"
+        elif row["herstel"] < 40:
+            row["status"] = "rood"
+            redenen.append("lage herstelscore")
+        else:
+            row["status"] = "oranje"
+        row["status_reden"] = ", ".join(redenen) or None
 
     for row in daily:
         row.pop("_bed_min", None)
@@ -451,26 +528,48 @@ def main():
     str_days = days_since(lambda w: w["sport"] == "Kracht" and (w["minuten"] or 0) >= 15)
     trained_today = any(w["datum"] == today.isoformat() for w in workout_rows)
 
+    src = t if t["herstel"] is not None else y
+    status = src.get("status") or ("onbekend" if ready is None else "oranje")
+    reden = src.get("status_reden")
+    week_start = today - timedelta(days=today.weekday())
+    kwaliteit_deze_week = sum(1 for w in workout_rows if w["sport"] == "Hardlopen"
+                              and date.fromisoformat(w["datum"]) >= week_start and ((w["z4"] or 0) + (w["z5"] or 0)) >= 10)
+    langste_4w = max([w["km"] or 0 for w in workout_rows if w["sport"] == "Hardlopen"
+                      and date.fromisoformat(w["datum"]) >= today - timedelta(days=28)] + [0])
+    lange_max = r(langste_4w + prof.get("lange_run_max_groei_km", 1.5), 1)
+    trained_days = {w["datum"] for w in workout_rows if (w["minuten"] or 0) >= 15}
+    streak = 0
+    while (today - timedelta(days=streak + 1)).isoformat() in trained_days:
+        streak += 1
+    rustdag = today.weekday() in prof.get("rustdagen", [])
+    max_rij = prof.get("max_dagen_achter_elkaar", 3)
+
     if ready is None:
-        status, titel, tekst = "onbekend", "Nog geen herstelmeting", "Er is nog geen HRV of slaap van vannacht binnen. Draag je horloge vannacht en open Health Auto Export als het niet vanzelf synchroniseert."
-    elif ready < 45:
-        status, titel, tekst = "rood", "Hersteldag", "Je herstel ligt duidelijk onder je normaal. Houd het bij wandelen, mobiliteit of 20-30 minuten heel rustig fietsen (zone 1). Geen zware benen en geen intervallen."
-    elif ready < 65:
-        status = "oranje"
+        titel, tekst = "Nog geen herstelmeting", "Er is nog geen HRV of slaap van vannacht binnen. Draag je horloge vannacht en open Health Auto Export als het niet vanzelf synchroniseert."
+    elif status == "rood":
+        titel = "Rustdag"
+        tekst = ("Rood" + (f" ({reden})" if reden else "") + ": vandaag rust. Hooguit wandelen of mobiliteit. "
+                 "Een gemiste sessie haal je niet in.")
+    elif streak >= max_rij:
+        titel, tekst = "Rustdag", f"Je hebt {streak} dagen achter elkaar getraind. Neem vandaag rust (maximaal {max_rij} dagen achter elkaar)."
+    elif status == "oranje":
         if run_days is None or run_days >= 2:
-            titel, tekst = "Rustige duurloop", "Matig herstel: loop 30-45 minuten in zone 2 (je moet kunnen praten). Dit bouwt je marathonbasis zonder extra vermoeidheid."
+            titel, tekst = "Rustige duurloop", "Oranje: loop 30-45 minuten in zone 2 (onder 150 bpm, je moet kunnen praten). Geen tempo en geen zware benen."
         else:
-            titel, tekst = "Kracht bovenlichaam of techniek", "Matig herstel: train bovenlichaam en core, of doe lichte techniek. Spaar je benen voor je volgende loop."
+            titel, tekst = "Upper body", "Oranje: train bovenlichaam (push of pull) en core. Spaar je benen en je knie voor je volgende loop."
+        if rustdag:
+            tekst = "Vandaag is je standaard rustdag; rust is ook prima. " + tekst
     else:
-        status = "groen"
-        if long_days is None or long_days >= 6:
-            titel, tekst = "Lange duurloop", "Goed hersteld en je lange duurloop is meer dan 5 dagen geleden. Loop rustig (zone 2) 10-20% langer dan je langste loop van de afgelopen weken."
-        elif hard_days is None or hard_days >= 5:
-            titel, tekst = "Kwaliteitstraining hardlopen", "Goed hersteld: tijd voor tempo of intervallen, bijvoorbeeld 5 x 4 min in zone 4 met 2 min dribbelen. Plan beentraining minstens 24 uur ervoor of erna."
-        elif str_days is None or str_days >= 2:
-            titel, tekst = "Zware krachttraining", "Goed hersteld: train zwaar (squat, deadlift, of push/pull) met 3-6 herhalingen per set. Doe dit liefst op een andere dag dan je lange loop of intervallen."
+        if rustdag:
+            titel, tekst = "Rustdag (gepland)", "Groen, maar vandaag is je standaard rustdag. Rust, of schuif hem als je daar deze week een reden voor hebt."
+        elif long_days is None or long_days >= 6:
+            titel, tekst = "Lange duurloop", f"Groen: lange rustige loop in zone 2, maximaal {str(lange_max).replace('.', ',')} km (hooguit 1,5 km langer dan je langste loop van de laatste 4 weken). Stop of pas aan bij kniepijn boven 3/10."
+        elif kwaliteit_deze_week < prof.get("max_kwaliteit_per_week", 1) and (hard_days is None or hard_days >= 3):
+            titel, tekst = "Kwaliteitsrun", "Groen: je ene kwaliteitsrun van deze week, bijvoorbeeld intervallen rond racetempo. Laat 48 uur tussen dit en zware beentraining."
+        elif str_days is None or str_days >= 1:
+            titel, tekst = "Zware krachttraining", "Groen: train zwaar volgens je split (push, pull of legs). Bij legs: 48 uur afstand tot je kwaliteitsrun en lange loop."
         else:
-            titel, tekst = "Rustige duurloop of kracht", "Goed hersteld en je schema is in balans. Kies een rustige zone 2-loop van 40-60 minuten of een krachttraining voor je bovenlichaam."
+            titel, tekst = "Rustige duurloop of upper body", "Groen en je week is in balans. Kies een rustige zone 2-loop of een upper-body-sessie."
     if trained_today and ready is not None:
         tekst += " Je hebt vandaag al getraind: tel dat mee."
     # Last night's sleep only arrives after the phone is unlocked and synced. Say so when it is missing.
@@ -488,6 +587,10 @@ def main():
         "rhr_basis": t["rhr_basis"] or y.get("rhr_basis"),
         "slaap_u": t["slaap_u"] if t["slaap_u"] is not None else y.get("slaap_u"),
         "slaapscore": t["slaapscore"] if t["slaapscore"] is not None else y.get("slaapscore"),
+        "slaap_hr": src.get("slaap_hr"), "adem": src.get("adem"), "adem_basis": src.get("adem_basis"),
+        "temp_afwijking": src.get("temp_afwijking"), "status_reden": reden,
+        "kwaliteitsruns_deze_week": kwaliteit_deze_week, "lange_run_max_km": lange_max,
+        "dagen_achter_elkaar_getraind": streak, "rustdag": rustdag,
         "acwr": t["acwr"], "vo2max": t["vo2max_laatst"],
         "dagen_sinds_lange_loop": long_days, "dagen_sinds_harde_loop": hard_days,
         "dagen_sinds_kracht": str_days, "hrmax": r(hr_max, 0), "hrrust": r(hr_rest, 0),
@@ -503,6 +606,23 @@ def main():
         {"label": "Gemaakt", "value": datetime.now(TZ).strftime("%Y-%m-%d %H:%M %Z")},
     ]
     files = {"dagen": daily, "trainingen": workout_rows, "weken": week_rows, "vandaag": today_row}
+    if prof:
+        # Goals from the profile: races with days to go, today's nutrition phase, weight log.
+        doelen = []
+        for w in prof.get("wedstrijden", []):
+            dagen_tot = (date.fromisoformat(w["datum"]) - today).days
+            if dagen_tot >= 0:
+                doelen.append({"soort": "wedstrijd", "naam": w["naam"], "datum": w["datum"], "dagen_tot": dagen_tot,
+                               "weken_tot": r(dagen_tot / 7, 1), "afstand_km": w.get("afstand_km"), "doel": w.get("doel")})
+        fase = next((f for f in prof.get("voeding_fases", []) if f["van"] <= today.isoformat() <= f["tot"]), None)
+        if fase:
+            doelen.append({"soort": "voeding", "naam": fase["naam"], "datum": fase["tot"],
+                           "dagen_tot": (date.fromisoformat(fase["tot"]) - today).days,
+                           "doel": f"{fase['kcal']} kcal, {fase['eiwit']} g eiwit"})
+        files["doelen"] = doelen
+        weights = {g["datum"]: g["kg"] for g in prof.get("gewicht_log", [])}
+        weights.update({d["datum"]: d["gewicht_kg"] for d in daily if d["gewicht_kg"] is not None})
+        files["gewicht"] = [{"datum": k, "kg": v, "doel_kg": prof.get("doel_gewicht")} for k, v in sorted(weights.items())]
     for name, rows in files.items():
         with open(os.path.join(args.out, f"{name}.json"), "w", encoding="utf-8") as f:
             json.dump({"rows": rows, "meta": meta}, f, ensure_ascii=False, allow_nan=False)
@@ -511,6 +631,14 @@ def main():
         summary = {k: today_row[0][k] for k in ("herstel", "status", "advies", "uitleg", "hrv", "hrv_basis", "rhr", "rhr_basis", "slaap_u", "slaapscore", "acwr", "vo2max")}
         summary.update({"datum": data_datum.isoformat(), "vers": vers, "week_km": wk.get("run_km"), "week_runs": wk.get("runs"),
                         "week_kracht": wk.get("kracht_sessies"), "week_rustig_pct": wk.get("rustig_pct")})
+        summary["slaap_hr"] = today_row[0].get("slaap_hr")
+        if args.sessie:
+            with open(args.sessie, encoding="utf-8") as f:
+                sessie = json.load(f)
+            sessie = sessie["rows"][0] if "rows" in sessie else sessie
+            summary["advies"] = sessie.get("titel") or summary["advies"]
+            summary["uitleg"] = sessie.get("waarom") or summary["uitleg"]
+            summary["onderdelen"] = sessie.get("onderdelen")
         print("summary:", json.dumps(push_summary(args.url, summary)))
     print(json.dumps({k: len(v) for k, v in files.items()} | {"hrmax": hr_max, "hrrust": hr_rest, "herstel": ready, "advies": titel}))
 
