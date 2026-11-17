@@ -444,9 +444,15 @@ def main():
             titel, tekst = "Rustige duurloop of kracht", "Goed hersteld en je schema is in balans. Kies een rustige zone 2-loop van 40-60 minuten of een krachttraining voor je bovenlichaam."
     if trained_today and ready is not None:
         tekst += " Je hebt vandaag al getraind: tel dat mee."
+    # Last night's sleep only arrives after the phone is unlocked and synced. Say so when it is missing.
+    vers = t["slaap_u"] is not None
+    data_datum = today if vers else today - timedelta(days=1)
+    if not vers and ready is not None:
+        tekst = ("Let op: je slaap van vannacht is nog niet binnen, dit advies gaat uit van de nacht ervoor. "
+                 "Open Health Auto Export om te synchroniseren. ") + tekst
 
     today_row = [{
-        "datum": today.isoformat(), "herstel": ready, "status": status, "advies": titel, "uitleg": tekst,
+        "datum": today.isoformat(), "data_van": data_datum.isoformat(), "vers": vers, "herstel": ready, "status": status, "advies": titel, "uitleg": tekst,
         "hrv": t["hrv"] if t["hrv"] is not None else y.get("hrv"),
         "hrv_basis": t["hrv_basis"] or y.get("hrv_basis"),
         "rhr": t["rhr"] if t["rhr"] is not None else y.get("rhr"),
@@ -473,7 +479,7 @@ def main():
     if args.push_summary:
         wk = week_rows[-1] if week_rows else {}
         summary = {k: today_row[0][k] for k in ("herstel", "status", "advies", "uitleg", "hrv", "hrv_basis", "rhr", "rhr_basis", "slaap_u", "acwr", "vo2max")}
-        summary.update({"datum": today.isoformat(), "week_km": wk.get("run_km"), "week_runs": wk.get("runs"),
+        summary.update({"datum": data_datum.isoformat(), "vers": vers, "week_km": wk.get("run_km"), "week_runs": wk.get("runs"),
                         "week_kracht": wk.get("kracht_sessies"), "week_rustig_pct": wk.get("rustig_pct")})
         print("summary:", json.dumps(push_summary(args.url, summary)))
     print(json.dumps({k: len(v) for k, v in files.items()} | {"hrmax": hr_max, "hrrust": hr_rest, "herstel": ready, "advies": titel}))
