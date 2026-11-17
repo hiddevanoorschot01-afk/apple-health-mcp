@@ -238,6 +238,7 @@ def main():
           'heart_rate_variability','resting_heart_rate','sleep_analysis','vo2_max',
           'active_energy','step_count','respiratory_rate','apple_sleeping_wrist_temperature',
           'heart_rate','dietary_energy','protein','weight_body_mass','body_mass','body_fat_percentage',
+          'apple_exercise_time','apple_stand_hour',
           'waist_circumference')
         order by date""")
     raw_workouts = health_sql(args.url, f"""
@@ -391,6 +392,8 @@ def main():
             "vo2max_laatst": r(vo2_last, 1),
             "stappen": r(sum(b.get("step_count", [])), 0) if b.get("step_count") else None,
             "actief_kcal": r(kj / 4.184, 0) if kj else None,
+            "training_min": r(sum(b["apple_exercise_time"]), 0) if b.get("apple_exercise_time") else None,
+            "staan_u": r(min(sum(b["apple_stand_hour"]), 24), 0) if b.get("apple_stand_hour") else None,
             "belasting": r(load_by_day.get(d, 0.0), 0),
             "_bed_min": bed_min,
             "slaap_hr": r(slaap_hr), "adem": r(adem), "pols_temp": r(temp, 2),
