@@ -632,6 +632,10 @@ def main():
         summary.update({"datum": data_datum.isoformat(), "vers": vers, "week_km": wk.get("run_km"), "week_runs": wk.get("runs"),
                         "week_kracht": wk.get("kracht_sessies"), "week_rustig_pct": wk.get("rustig_pct")})
         summary["slaap_hr"] = today_row[0].get("slaap_hr")
+        races = [g for g in files.get("doelen", []) if g["soort"] == "wedstrijd"]
+        if races:
+            summary["wedstrijd"] = races[0]["naam"]
+            summary["wedstrijd_dagen"] = races[0]["dagen_tot"]
         if args.sessie:
             with open(args.sessie, encoding="utf-8") as f:
                 sessie = json.load(f)

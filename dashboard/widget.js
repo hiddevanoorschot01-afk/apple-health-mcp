@@ -1,10 +1,11 @@
 // Hybrid Training widget for the iOS app Scriptable (https://scriptable.app).
-// Shows today's recovery score, the suggested session, HRV / resting HR / sleep and
-// this week's balance. Tap the widget to open the full dashboard.
+// One glance: today's status and recovery score, the session to do (with its steps),
+// last night's vitals, this week's balance and the countdown to the next race.
+// Tap the widget to open the full dashboard.
 //
-// Setup: paste this script into Scriptable, fill in SERVER and SLEUTEL (your
-// MCP_SECRET), add a Scriptable widget to the home screen and pick this script.
-// Works in small, medium and large widget sizes.
+// Setup: paste this script into Scriptable, fill in SLEUTEL (your MCP_SECRET),
+// add a Scriptable widget to the home screen and pick this script.
+// Large shows everything; medium and small show the essentials.
 
 const SERVER = "https://apple-health-mcp-weld-iota.vercel.app";
 const SLEUTEL = "PLAK-HIER-JE-MCP_SECRET";
@@ -31,23 +32,30 @@ async function laadSamenvatting() {
   const rows = JSON.parse(payload.result.content[0].text);
   if (!rows.length) throw new Error("Nog geen samenvatting");
   const r = rows[0];
-  return { ...r.extra, herstel: r.qty == null ? null : Math.round(Number(r.qty)), opgeslagen: r.date };
+  const d = { ...r.extra, herstel: r.qty == null ? null : Math.round(Number(r.qty)) };
+  if (typeof d.onderdelen === "string") { try { d.onderdelen = JSON.parse(d.onderdelen); } catch (e) { d.onderdelen = [d.onderdelen]; } }
+  if (!Array.isArray(d.onderdelen)) d.onderdelen = [];
+  return d;
 }
 
+// ---------- look
 const kleur = {
-  groen: new Color("#34C759"), oranje: new Color("#FF9F0A"), rood: new Color("#FF453A"), onbekend: new Color("#8E8E93"),
+  groen: new Color("#30D158"), oranje: new Color("#FF9F0A"), rood: new Color("#FF453A"), onbekend: new Color("#8E8E93"),
 };
 const tekst = Color.dynamic(new Color("#1C1C1E"), new Color("#F2F2F7"));
 const zacht = Color.dynamic(new Color("#6C6C70"), new Color("#AEAEB2"));
 const achtergrond = Color.dynamic(new Color("#FFFFFF"), new Color("#1C1C1E"));
+const vlak = Color.dynamic(new Color("#F2F2F7"), new Color("#2C2C2E"));
 const balkLeeg = Color.dynamic(new Color("#E5E5EA"), new Color("#3A3A3C"));
-const statusTekst = { groen: "Goed hersteld", oranje: "Matig hersteld", rood: "Rust nodig", onbekend: "Nog geen meting" };
+const blauw = new Color("#0A84FF"), paars = new Color("#BF5AF2");
+const statusTekst = { groen: "Groen · goed hersteld", oranje: "Oranje · rustig aan", rood: "Rood · rustdag", onbekend: "Nog geen meting" };
 
 const nl = (v, d = 0) => (v == null ? "–" : Number(v).toFixed(d).replace(".", ","));
+const plus = (v, d = 1) => (v == null ? "–" : (v > 0 ? "+" : "") + nl(v, d));
 
-function label(stack, t, size, color, bold) {
+function label(stack, t, size, color, weight) {
   const l = stack.addText(t);
-  l.font = bold ? Font.semiboldSystemFont(size) : Font.systemFont(size);
+  l.font = weight === "bold" ? Font.boldSystemFont(size) : weight ? Font.semiboldSystemFont(size) : Font.systemFont(size);
   l.textColor = color;
   l.lineLimit = 1;
   l.minimumScaleFactor = 0.6;
@@ -56,92 +64,143 @@ function label(stack, t, size, color, bold) {
 
 function balk(stack, pct, color, width) {
   const ctx = new DrawContext();
-  ctx.size = new Size(width, 6);
+  ctx.size = new Size(width, 5);
   ctx.opaque = false;
   ctx.respectScreenScale = true;
-  const pad = new Path(); pad.addRoundedRect(new Rect(0, 0, width, 6), 3, 3);
-  ctx.addPath(pad); ctx.setFillColor(balkLeeg); ctx.fillPath();
+  const bg = new Path(); bg.addRoundedRect(new Rect(0, 0, width, 5), 2.5, 2.5);
+  ctx.addPath(bg); ctx.setFillColor(balkLeeg); ctx.fillPath();
   const w = Math.max(0, Math.min(1, pct)) * width;
-  if (w > 0) { const f = new Path(); f.addRoundedRect(new Rect(0, 0, w, 6), 3, 3); ctx.addPath(f); ctx.setFillColor(color); ctx.fillPath(); }
+  if (w > 0) { const f = new Path(); f.addRoundedRect(new Rect(0, 0, w, 5), 2.5, 2.5); ctx.addPath(f); ctx.setFillColor(color); ctx.fillPath(); }
   const img = stack.addImage(ctx.getImage());
-  img.imageSize = new Size(width, 6);
+  img.imageSize = new Size(width, 5);
 }
 
-function vital(stack, naam, waarde, normaal) {
+function vital(stack, naam, waarde, kleurWaarde) {
   const s = stack.addStack(); s.layoutVertically();
-  label(s, naam, 10, zacht);
-  label(s, waarde, 14, tekst, true);
-  if (normaal) label(s, normaal, 9, zacht);
+  label(s, naam, 9, zacht);
+  label(s, waarde, 13, kleurWaarde || tekst, "semi");
 }
 
 function weekRegel(stack, naam, waarde, pct, color, width) {
   const s = stack.addStack(); s.layoutVertically(); s.spacing = 2;
   const top = s.addStack();
-  label(top, naam, 10, zacht); top.addSpacer(); label(top, waarde, 10, tekst, true);
+  label(top, naam, 9, zacht); top.addSpacer(); label(top, waarde, 9, tekst, "semi");
   balk(s, pct, color, width);
 }
 
+function slaapHrKleur(v) {
+  if (v == null) return tekst;
+  return v >= 50 ? kleur.rood : v > 45 ? kleur.oranje : kleur.groen;
+}
+
+// ---------- blocks
+function kop(w, d, c, metWedstrijd) {
+  const k = w.addStack(); k.centerAlignContent();
+  const dot = k.addText("●"); dot.textColor = c; dot.font = Font.systemFont(10);
+  k.addSpacer(4);
+  label(k, statusTekst[d.status] || "Herstel", 11, c, "semi");
+  k.addSpacer();
+  if (metWedstrijd && d.wedstrijd && d.wedstrijd_dagen != null) {
+    label(k, d.wedstrijd.replace(" Rotterdam", "") + " · nog " + d.wedstrijd_dagen + " d", 10, zacht, "semi");
+  }
+}
+
+function scoreEnTraining(w, d, c, titelGrootte, titelRegels) {
+  const rij = w.addStack(); rij.centerAlignContent();
+  const sc = rij.addStack(); sc.layoutVertically();
+  label(sc, nl(d.herstel), 34, c, "bold");
+  label(sc, "herstel", 9, zacht);
+  rij.addSpacer(10);
+  const r = rij.addStack(); r.layoutVertically();
+  label(r, "Vandaag", 9, zacht, "semi");
+  const t = r.addText(d.advies || "–"); t.font = Font.semiboldSystemFont(titelGrootte); t.textColor = tekst; t.lineLimit = titelRegels; t.minimumScaleFactor = 0.75;
+}
+
+function onderdelenBlok(w, d, max) {
+  const items = (d.onderdelen || []).slice(0, max);
+  if (!items.length) return;
+  const box = w.addStack(); box.layoutVertically(); box.spacing = 2;
+  box.backgroundColor = vlak; box.cornerRadius = 8; box.setPadding(6, 8, 6, 8);
+  items.forEach((o) => {
+    const regel = box.addStack();
+    const b = regel.addText("• "); b.font = Font.systemFont(10); b.textColor = zacht;
+    const t = regel.addText(o); t.font = Font.systemFont(10); t.textColor = tekst; t.lineLimit = 2; t.minimumScaleFactor = 0.85;
+    regel.addSpacer();
+  });
+  const rest = (d.onderdelen || []).length - items.length;
+  if (rest > 0) label(box, "+ " + rest + " meer in het dashboard", 9, zacht);
+}
+
+function vitalsRij(w, d, groot) {
+  const v = w.addStack(); v.spacing = groot ? 12 : 10;
+  vital(v, "Slaap", nl(d.slaap_u, 1) + " u");
+  vital(v, "Score", nl(d.slaapscore));
+  vital(v, "Slaap-HR", nl(d.slaap_hr), slaapHrKleur(d.slaap_hr));
+  vital(v, "HRV", nl(d.hrv) + (groot ? " / " + nl(d.hrv_basis) : ""));
+  if (groot) vital(v, "VO₂max", nl(d.vo2max, 1));
+}
+
+function weekBlok(w, d, breedte) {
+  const wk = w.addStack(); wk.spacing = 10;
+  weekRegel(wk, "Kracht", nl(d.week_kracht) + "/" + DOEL_KRACHT, (d.week_kracht || 0) / DOEL_KRACHT, kleur.groen, breedte);
+  weekRegel(wk, "Runs", nl(d.week_runs) + "/" + DOEL_RUNS + " · " + nl(d.week_km, 1) + " km", (d.week_runs || 0) / DOEL_RUNS, blauw, breedte);
+  weekRegel(wk, "Rustig", d.week_rustig_pct == null ? "–" : nl(d.week_rustig_pct) + "%", (d.week_rustig_pct || 0) / DOEL_RUSTIG, paars, breedte);
+}
+
+function voet(w, d) {
+  const f = w.addStack();
+  const datum = (d.datum || "").split("-").reverse().slice(0, 2).join("-");
+  label(f, d.vers === false ? "⚠︎ Slaap van vannacht nog niet binnen" : "Data van " + datum, 8, d.vers === false ? kleur.oranje : zacht);
+  f.addSpacer();
+  label(f, "Tik voor dashboard", 8, zacht);
+}
+
+// ---------- widget sizes
 function bouwWidget(d, size) {
   const w = new ListWidget();
   w.backgroundColor = achtergrond;
   w.url = DASHBOARD;
-  w.setPadding(14, 14, 14, 14);
-  w.refreshAfterDate = new Date(Date.now() + 60 * 60 * 1000);
+  w.refreshAfterDate = new Date(Date.now() + 30 * 60 * 1000);
   const c = kleur[d.status] || kleur.onbekend;
 
-  const kop = w.addStack(); kop.centerAlignContent();
-  const dot = kop.addText("●"); dot.textColor = c; dot.font = Font.systemFont(10);
-  kop.addSpacer(4);
-  label(kop, statusTekst[d.status] || "Herstel", 11, zacht, true);
-  kop.addSpacer();
-  if (size !== "small") label(kop, "Hybrid Training", 11, zacht);
-  w.addSpacer(4);
-
   if (size === "small") {
-    const sc = w.addStack(); sc.bottomAlignContent();
-    label(sc, nl(d.herstel), 40, c, true); sc.addSpacer(2); label(sc, "/100", 12, zacht);
+    w.setPadding(12, 12, 12, 12);
+    kop(w, d, c, false);
     w.addSpacer(2);
-    const a = w.addText(d.advies || "–"); a.font = Font.semiboldSystemFont(13); a.textColor = tekst; a.lineLimit = 2; a.minimumScaleFactor = 0.7;
+    label(w, nl(d.herstel), 32, c, "bold");
+    const a = w.addText(d.advies || "–"); a.font = Font.semiboldSystemFont(12); a.textColor = tekst; a.lineLimit = 3; a.minimumScaleFactor = 0.7;
     w.addSpacer();
-    label(w, "Slaap " + nl(d.slaap_u, 1) + " u (" + nl(d.slaapscore) + ") · HRV " + nl(d.hrv), 10, zacht);
+    label(w, "Slaap " + nl(d.slaap_u, 1) + " u · HR " + nl(d.slaap_hr), 9, zacht);
     return w;
   }
 
-  const rij = w.addStack(); rij.centerAlignContent();
-  const links = rij.addStack(); links.layoutVertically();
-  const sc = links.addStack(); sc.bottomAlignContent();
-  label(sc, nl(d.herstel), 38, c, true); sc.addSpacer(2); label(sc, "/100", 11, zacht);
-  rij.addSpacer(12);
-  const rechts = rij.addStack(); rechts.layoutVertically();
-  const a = rechts.addText(d.advies || "–"); a.font = Font.semiboldSystemFont(15); a.textColor = tekst; a.lineLimit = 2; a.minimumScaleFactor = 0.7;
-  if (size === "large") {
-    rechts.addSpacer(2);
-    const u = rechts.addText(d.uitleg || ""); u.font = Font.systemFont(11); u.textColor = zacht; u.lineLimit = 4; u.minimumScaleFactor = 0.8;
+  if (size === "medium") {
+    w.setPadding(12, 14, 10, 14);
+    kop(w, d, c, true);
+    w.addSpacer(4);
+    scoreEnTraining(w, d, c, 14, 2);
+    w.addSpacer(6);
+    vitalsRij(w, d, false);
+    w.addSpacer(6);
+    weekBlok(w, d, 88);
+    return w;
   }
-  w.addSpacer(8);
 
-  const vit = w.addStack(); vit.spacing = 14;
-  vital(vit, "HRV", nl(d.hrv) + " ms", size === "large" ? "normaal " + nl(d.hrv_basis) : null);
-  vital(vit, "Rust-HR", nl(d.rhr) + " bpm", size === "large" ? "normaal " + nl(d.rhr_basis) : null);
-  vital(vit, "Slaap", nl(d.slaap_u, 1) + " u", size === "large" ? "doel 7,5" : null);
-  vital(vit, "Slaapscore", nl(d.slaapscore), size === "large" ? "van 100" : null);
-  if (size === "large") vital(vit, "VO₂max", nl(d.vo2max, 1), "ml/kg·min");
-
+  // large (and extra large): everything
+  w.setPadding(14, 14, 10, 14);
+  kop(w, d, c, true);
+  w.addSpacer(6);
+  scoreEnTraining(w, d, c, 16, 2);
+  w.addSpacer(6);
+  onderdelenBlok(w, d, 5);
   w.addSpacer(8);
-  const barW = size === "large" ? 300 : 135;
-  if (size === "large") {
-    label(w, "Deze week", 11, zacht, true); w.addSpacer(4);
-    const wk = w.addStack(); wk.layoutVertically(); wk.spacing = 6;
-    weekRegel(wk, "Kracht", nl(d.week_kracht) + " / " + DOEL_KRACHT, (d.week_kracht || 0) / DOEL_KRACHT, kleur.groen, barW);
-    weekRegel(wk, "Hardlopen", nl(d.week_runs) + " / " + DOEL_RUNS + " · " + nl(d.week_km, 1) + " km", (d.week_runs || 0) / DOEL_RUNS, new Color("#0A84FF"), barW);
-    weekRegel(wk, "Rustig gelopen", d.week_rustig_pct == null ? "–" : nl(d.week_rustig_pct) + "% / " + DOEL_RUSTIG + "%", (d.week_rustig_pct || 0) / DOEL_RUSTIG, new Color("#0A84FF"), barW);
-  } else {
-    const wk = w.addStack(); wk.spacing = 12;
-    weekRegel(wk, "Kracht", nl(d.week_kracht) + "/" + DOEL_KRACHT, (d.week_kracht || 0) / DOEL_KRACHT, kleur.groen, barW);
-    weekRegel(wk, "Lopen", nl(d.week_km, 1) + " km", (d.week_runs || 0) / DOEL_RUNS, new Color("#0A84FF"), barW);
-  }
+  vitalsRij(w, d, true);
+  w.addSpacer(8);
+  label(w, "Deze week", 9, zacht, "semi");
+  w.addSpacer(3);
+  weekBlok(w, d, 92);
   w.addSpacer();
-  label(w, "Bijgewerkt " + (d.datum || "").split("-").reverse().join("-"), 9, zacht);
+  voet(w, d);
   return w;
 }
 
@@ -149,14 +208,14 @@ function foutWidget(msg) {
   const w = new ListWidget();
   w.backgroundColor = achtergrond;
   w.url = DASHBOARD;
-  label(w, "Hybrid Training", 12, zacht, true);
+  label(w, "Hybrid Training", 12, zacht, "semi");
   w.addSpacer(4);
   const t = w.addText(msg); t.font = Font.systemFont(12); t.textColor = tekst;
   return w;
 }
 
 let widget;
-const size = config.widgetFamily || "medium";
+const size = config.widgetFamily || "large";
 try {
   widget = bouwWidget(await laadSamenvatting(), size);
 } catch (e) {
@@ -164,7 +223,11 @@ try {
 }
 if (config.runsInWidget) {
   Script.setWidget(widget);
-} else {
+} else if (size === "small") {
+  await widget.presentSmall();
+} else if (size === "medium") {
   await widget.presentMedium();
+} else {
+  await widget.presentLarge();
 }
 Script.complete();
