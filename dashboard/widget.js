@@ -35,6 +35,8 @@ async function laadSamenvatting() {
   const d = { ...r.extra, herstel: r.qty == null ? null : Math.round(Number(r.qty)) };
   if (typeof d.onderdelen === "string") { try { d.onderdelen = JSON.parse(d.onderdelen); } catch (e) { d.onderdelen = [d.onderdelen]; } }
   if (!Array.isArray(d.onderdelen)) d.onderdelen = [];
+  if (typeof d.week_dagen === "string") { try { d.week_dagen = JSON.parse(d.week_dagen); } catch (e) { d.week_dagen = []; } }
+  if (!Array.isArray(d.week_dagen)) d.week_dagen = [];
   return d;
 }
 
@@ -147,6 +149,33 @@ function weekBlok(w, d, breedte) {
   weekRegel(wk, "Rustig", d.week_rustig_pct == null ? "–" : nl(d.week_rustig_pct) + "%", (d.week_rustig_pct || 0) / DOEL_RUSTIG, paars, breedte);
 }
 
+function weekStrip(w, d) {
+  if (!d.week_dagen.length) return;
+  const rij = w.addStack(); rij.spacing = 4;
+  d.week_dagen.forEach((dag) => {
+    const k = rij.addStack(); k.layoutVertically(); k.spacing = 1;
+    k.size = new Size(40, 44);
+    k.cornerRadius = 6; k.setPadding(3, 4, 3, 4);
+    k.backgroundColor = dag.vandaag ? vlak : achtergrond;
+    if (dag.vandaag) { k.borderColor = tekst; k.borderWidth = 1; }
+    const top = k.addStack(); top.centerAlignContent();
+    label(top, dag.dag, 9, dag.vandaag ? tekst : zacht, dag.vandaag ? "bold" : "semi");
+    top.addSpacer();
+    const teken = dag.gedaan ? "✓" : dag.verleden ? "–" : dag.vandaag ? "●" : "";
+    if (teken) label(top, teken, 9, dag.gedaan ? kleur.groen : dag.vandaag ? (kleur[d.status] || zacht) : zacht, "bold");
+    const t = k.addText(dag.tekst || (dag.verleden ? "rust" : ""));
+    t.font = Font.systemFont(8); t.textColor = dag.gedaan || dag.vandaag ? tekst : zacht; t.lineLimit = 2; t.minimumScaleFactor = 0.7;
+    k.addSpacer();
+  });
+}
+
+function dagInfo(w, d) {
+  const rij = w.addStack(); rij.centerAlignContent();
+  if (d.voeding) label(rij, "🍽 " + d.voeding, 10, tekst, "semi");
+  rij.addSpacer();
+  if (d.bedtijd) label(rij, "🛏 Vanavond slapen om " + d.bedtijd, 10, tekst, "semi");
+}
+
 function voet(w, d) {
   const f = w.addStack();
   const datum = (d.datum || "").split("-").reverse().slice(0, 2).join("-");
@@ -199,6 +228,10 @@ function bouwWidget(d, size) {
   label(w, "Deze week", 9, zacht, "semi");
   w.addSpacer(3);
   weekBlok(w, d, 92);
+  w.addSpacer(8);
+  weekStrip(w, d);
+  w.addSpacer(8);
+  dagInfo(w, d);
   w.addSpacer();
   voet(w, d);
   return w;

@@ -636,6 +636,7 @@ def main():
         if races:
             summary["wedstrijd"] = races[0]["naam"]
             summary["wedstrijd_dagen"] = races[0]["dagen_tot"]
+        sessie = {}
         if args.sessie:
             with open(args.sessie, encoding="utf-8") as f:
                 sessie = json.load(f)
@@ -643,6 +644,35 @@ def main():
             summary["advies"] = sessie.get("titel") or summary["advies"]
             summary["uitleg"] = sessie.get("waarom") or summary["uitleg"]
             summary["onderdelen"] = sessie.get("onderdelen")
+
+        # Week strip: what was done Monday..today, and the plan for the rest of the week.
+        dagnamen = ["ma", "di", "wo", "do", "vr", "za", "zo"]
+        plan = sessie.get("week_plan") or {}
+        kort = {"Kracht": "Kracht", "Hardlopen": "Run", "Fietsen": "Fiets", "Overig": "Overig"}
+        week_dagen = []
+        for i, naam in enumerate(dagnamen):
+            dag = week_start + timedelta(days=i)
+            gedaan = [w for w in workout_rows if w["datum"] == dag.isoformat() and (w["minuten"] or 0) >= 15]
+            soorten = list(dict.fromkeys(kort.get(w["sport"], w["sport"]) for w in gedaan))
+            run_km = sum(w["km"] or 0 for w in gedaan if w["sport"] == "Hardlopen")
+            tekst_dag = " + ".join(f"{x} {run_km:.0f}k".replace(".", ",") if x == "Run" and run_km else x for x in soorten)
+            week_dagen.append({"dag": naam, "gedaan": bool(gedaan), "tekst": tekst_dag if gedaan else plan.get(naam, ""),
+                               "vandaag": dag == today, "verleden": dag < today})
+        summary["week_dagen"] = week_dagen
+
+        # Tonight's bedtime: next wake-up minus the sleep goal.
+        morgen = today + timedelta(days=1)
+        wake = prof.get("opstaan_weekend" if morgen.weekday() >= 5 else "opstaan_doordeweeks")
+        if sessie.get("bedtijd"):
+            summary["bedtijd"] = sessie["bedtijd"]
+        elif wake:
+            hh, mm = map(int, wake.split(":"))
+            bt = datetime(2000, 1, 2, hh, mm) - timedelta(hours=prof.get("slaap_doel", 7.5))
+            summary["bedtijd"] = bt.strftime("%H:%M")
+        if sessie.get("voeding"):
+            summary["voeding"] = sessie["voeding"]
+        elif fase:
+            summary["voeding"] = f"{fase['kcal']} kcal · {fase['eiwit']} g eiwit"
         print("summary:", json.dumps(push_summary(args.url, summary)))
     print(json.dumps({k: len(v) for k, v in files.items()} | {"hrmax": hr_max, "hrrust": hr_rest, "herstel": ready, "advies": titel}))
 
