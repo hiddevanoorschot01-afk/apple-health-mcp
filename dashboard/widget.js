@@ -222,7 +222,7 @@ function ringenAfbeelding(r, maat) {
 
 function ringenBlok(w, r, groot) {
   const rij = w.addStack(); rij.centerAlignContent();
-  const maat = groot ? 58 : 46;
+  const maat = groot ? 52 : 46;
   const img = rij.addImage(ringenAfbeelding(r, maat));
   img.imageSize = new Size(maat, maat);
   rij.addSpacer(10);
@@ -263,28 +263,35 @@ function weekStrip(w, d) {
 
 function dagInfo(w, d) {
   const rij = w.addStack(); rij.centerAlignContent();
-  if (d.voeding) label(rij, "🍽 " + d.voeding, 10, tekst, "semi");
-  rij.addSpacer();
   if (d.bedtijd) label(rij, "🛏 Vanavond slapen om " + d.bedtijd, 10, tekst, "semi");
+  rij.addSpacer();
 }
 
-function voet(w, d) {
-  const f = w.addStack(); f.centerAlignContent();
+function knop(rij, tekstKnop, url, breedte) {
+  const k = rij.addStack();
+  k.url = url;
+  k.size = new Size(breedte, 30);
+  k.backgroundColor = vlak; k.cornerRadius = 9;
+  k.centerAlignContent();
+  k.addSpacer();
+  label(k, tekstKnop, 12, tekst, "semi");
+  k.addSpacer();
+}
+
+function voet(w, d, breedte) {
   const df = new DateFormatter(); df.dateFormat = "HH:mm";
   if (d.vers === false) {
-    label(f, "⚠︎ Slaap van vannacht nog niet binnen", 8, kleur.oranje);
+    label(w, "⚠︎ Slaap van vannacht nog niet binnen", 8, kleur.oranje);
   } else {
     const sync = d.ringen && d.ringen.laatst ? df.string(new Date(String(d.ringen.laatst).replace(" ", "T").replace(/\+00$/, "+00:00"))) : "–";
-    label(f, "iPhone-sync " + sync + " · widget " + df.string(new Date()), 8, zacht);
+    label(w, (d.bedtijd ? "🛏 Slapen om " + d.bedtijd + "  ·  " : "") + "iPhone-sync " + sync + " · widget " + df.string(new Date()), 8, zacht);
   }
-  f.addSpacer();
-  const knop = f.addStack(); knop.url = VERVERS_URL;
-  knop.backgroundColor = vlak; knop.cornerRadius = 6; knop.setPadding(2, 7, 2, 7);
-  label(knop, "↻ Ververs", 9, tekst, "semi");
-  f.addSpacer(6);
-  const naarDashboard = f.addStack(); naarDashboard.url = DASHBOARD;
-  naarDashboard.backgroundColor = vlak; naarDashboard.cornerRadius = 6; naarDashboard.setPadding(2, 7, 2, 7);
-  label(naarDashboard, "Dashboard ›", 9, tekst, "semi");
+  w.addSpacer(4);
+  const rij = w.addStack(); rij.centerAlignContent();
+  const half = Math.floor((breedte - 10) / 2);
+  knop(rij, "↻  Ververs", VERVERS_URL, half);
+  rij.addSpacer(10);
+  knop(rij, "Dashboard  ›", DASHBOARD, half);
 }
 
 // ---------- widget sizes
@@ -313,10 +320,11 @@ function bouwWidget(d, size) {
     scoreEnTraining(w, d, c, 14, 2);
     w.addSpacer(6);
     vitalsRij(w, d, false);
-    w.addSpacer(6);
-    if (d.ringen) ringenBlok(w, d.ringen, false); else weekBlok(w, d, 88);
     w.addSpacer();
-    voet(w, d);
+    const rij = w.addStack(); rij.centerAlignContent();
+    knop(rij, "↻  Ververs", VERVERS_URL, 143);
+    rij.addSpacer(10);
+    knop(rij, "Dashboard  ›", DASHBOARD, 143);
     return w;
   }
 
@@ -326,17 +334,15 @@ function bouwWidget(d, size) {
   w.addSpacer(6);
   scoreEnTraining(w, d, c, 16, 2);
   w.addSpacer(6);
-  onderdelenBlok(w, d, 4);
+  onderdelenBlok(w, d, 3);
   w.addSpacer(6);
   vitalsRij(w, d, true);
   w.addSpacer(6);
   if (d.ringen) ringenBlok(w, d.ringen, true); else weekBlok(w, d, 92);
   w.addSpacer(6);
   weekStrip(w, d);
-  w.addSpacer(8);
-  dagInfo(w, d);
   w.addSpacer();
-  voet(w, d);
+  voet(w, d, 300);
   return w;
 }
 
