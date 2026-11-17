@@ -52,4 +52,29 @@ describe("persist", () => {
     expect(await db.select().from(workouts)).toHaveLength(1);
     expect(await db.select().from(healthEvents)).toHaveLength(1); // event dedupe by (type,date,payload)
   });
+
+  it("updates a metric bucket that is re-sent with a newer value", async () => {
+    const db = await makeTestDb();
+    const send = (qty: number) => normalize({
+      data: { metrics: [{ name: "active_energy", units: "kJ", data: [{ date: D, qty, source: "Watch" }] }],
+        workouts: [], ecg: [], stateOfMind: [], symptoms: [], medications: [], cycleTracking: [], heartRateNotifications: [] },
+    });
+    await persist(db, send(85)); // partial hour
+    await persist(db, send(840)); // same hour, complete
+    const rows = await db.select().from(metricSamples);
+    expect(rows).toHaveLength(1);
+    expect(Number(rows[0].qty)).toBe(840);
+  });
+
+  it("accepts the same key twice in one payload (last one wins)", async () => {
+    const db = await makeTestDb();
+    await persist(db, normalize({
+      data: { metrics: [{ name: "step_count", units: "count", data: [
+          { date: D, qty: 10, source: "Watch" }, { date: D, qty: 20, source: "Watch" }] }],
+        workouts: [], ecg: [], stateOfMind: [], symptoms: [], medications: [], cycleTracking: [], heartRateNotifications: [] },
+    }));
+    const rows = await db.select().from(metricSamples);
+    expect(rows).toHaveLength(1);
+    expect(Number(rows[0].qty)).toBe(20);
+  });
 });

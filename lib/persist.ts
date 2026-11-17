@@ -28,17 +28,37 @@ function chunk<T>(arr: T[], size: number): T[][] {
 }
 
 // Persist normalized rows idempotently:
-// - metric_samples: ON CONFLICT (metric_name,date,source) DO NOTHING (unique index).
+// - metric_samples: ON CONFLICT (metric_name,date,source) DO UPDATE (latest wins).
+//   Health Auto Export re-sends an hourly bucket while the hour is still running and
+//   again once it is complete; keeping the first (partial) value under-counted totals
+//   such as active energy and exercise minutes.
 // - workouts: ON CONFLICT (id) DO UPDATE (latest wins).
 // - health_events: delete existing rows matching (event_type,date,payload) then insert,
 //   since a portable jsonb-hash unique index isn't available across drivers.
 export async function persist(db: Db, data: NormalizeResult): Promise<IngestSummary> {
-  for (const batch of chunk(data.metricRows, METRIC_CHUNK)) {
+  // One INSERT ... ON CONFLICT DO UPDATE may not touch the same row twice, so collapse
+  // duplicate keys within a payload first (the later point wins).
+  const byKey = new Map<string, (typeof data.metricRows)[number]>();
+  for (const r of data.metricRows) {
+    byKey.set(`${r.metricName}\u0000${r.date.toISOString()}\u0000${r.source ?? ""}`, r);
+  }
+  const metricRows = [...byKey.values()];
+  for (const batch of chunk(metricRows, METRIC_CHUNK)) {
     await db
       .insert(metricSamples)
       .values(batch)
-      .onConflictDoNothing({
+      .onConflictDoUpdate({
         target: [metricSamples.metricName, metricSamples.date, metricSamples.source],
+        set: {
+          units: sql`excluded.units`,
+          qty: sql`excluded.qty`,
+          min: sql`excluded.min`,
+          avg: sql`excluded.avg`,
+          max: sql`excluded.max`,
+          systolic: sql`excluded.systolic`,
+          diastolic: sql`excluded.diastolic`,
+          extra: sql`excluded.extra`,
+        },
       });
   }
 
