@@ -12,6 +12,40 @@ const SLEUTEL = "PLAK-HIER-JE-MCP_SECRET";
 const DASHBOARD = "https://claude.ai/artifact/KEHQuNifF2n9DmKmjoW9yA";
 
 const DOEL_KRACHT = 3, DOEL_RUNS = 3, DOEL_RUSTIG = 80;
+// Your Apple Watch ring goals (Activity app on your iPhone): change these to yours.
+const RING_BEWEEG = 700;   // kcal actief
+const RING_TRAINING = 30;  // minuten
+const RING_STAAN = 12;     // uren
+
+async function healthSql(query) {
+  const req = new Request(SERVER + "/api/mcp");
+  req.method = "POST";
+  req.headers = { "Content-Type": "application/json", "Accept": "application/json, text/event-stream", "Authorization": "Bearer " + SLEUTEL };
+  req.body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "health_sql", arguments: { query } } });
+  const text = await req.loadString();
+  const line = text.split("\n").find((l) => l.startsWith("data: "));
+  const payload = JSON.parse(line ? line.slice(6) : text);
+  return JSON.parse(payload.result.content[0].text);
+}
+
+// Live: today's activity so far (one value per hour, so double-delivered hours count once).
+async function laadRingen() {
+  const rows = await healthSql(
+    "with x as (select metric_name m, date_trunc('hour', date) h, max(qty) q, max(date) laatst from metric_samples " +
+    "where metric_name in ('active_energy','apple_exercise_time','apple_stand_hour','step_count') " +
+    "and date >= (date_trunc('day', now() at time zone 'Europe/Amsterdam') at time zone 'Europe/Amsterdam') group by 1, 2) " +
+    "select m, sum(q) s, max(laatst) laatst from x group by m");
+  const r = { beweeg: 0, training: 0, staan: 0, stappen: 0, laatst: null };
+  rows.forEach((x) => {
+    const v = Number(x.s) || 0;
+    if (x.m === "active_energy") r.beweeg = v / 4.184;
+    if (x.m === "apple_exercise_time") r.training = v;
+    if (x.m === "apple_stand_hour") r.staan = Math.min(v, 24);
+    if (x.m === "step_count") r.stappen = v;
+    if (x.laatst && (!r.laatst || x.laatst > r.laatst)) r.laatst = x.laatst;
+  });
+  return r;
+}
 
 async function laadSamenvatting() {
   const req = new Request(SERVER + "/api/mcp");
@@ -149,6 +183,66 @@ function weekBlok(w, d, breedte) {
   weekRegel(wk, "Rustig", d.week_rustig_pct == null ? "–" : nl(d.week_rustig_pct) + "%", (d.week_rustig_pct || 0) / DOEL_RUSTIG, paars, breedte);
 }
 
+const ringKleur = { beweeg: new Color("#FA114F"), training: new Color("#A6FF00"), staan: new Color("#00F0FF") };
+
+function ringenAfbeelding(r, maat) {
+  const ctx = new DrawContext();
+  ctx.size = new Size(maat, maat);
+  ctx.opaque = false;
+  ctx.respectScreenScale = true;
+  const dik = maat * 0.12, gap = maat * 0.02;
+  const ringen = [
+    [r.beweeg / RING_BEWEEG, ringKleur.beweeg],
+    [r.training / RING_TRAINING, ringKleur.training],
+    [r.staan / RING_STAAN, ringKleur.staan],
+  ];
+  ringen.forEach(([pct, kl], i) => {
+    const straal = maat / 2 - dik / 2 - i * (dik + gap);
+    const c = maat / 2;
+    const boog = (van, tot, kleur) => {
+      const p = new Path();
+      const stappen = Math.max(2, Math.ceil((tot - van) * 120));
+      for (let k = 0; k <= stappen; k++) {
+        const a = -Math.PI / 2 + 2 * Math.PI * (van + (tot - van) * (k / stappen));
+        const pt = new Point(c + straal * Math.cos(a), c + straal * Math.sin(a));
+        if (k === 0) p.move(pt); else p.addLine(pt);
+      }
+      ctx.addPath(p); ctx.setStrokeColor(kleur); ctx.setLineWidth(dik); ctx.strokePath();
+    };
+    boog(0, 1, new Color(kl.hex, 0.22));
+    const vol = Math.max(0, Math.min(pct, 1));
+    if (vol > 0) boog(0, vol, kl);
+    if (pct > 1) boog(0, Math.min(pct - 1, 1), new Color(kl.hex, 0.75));
+  });
+  return ctx.getImage();
+}
+
+function ringenBlok(w, r, groot) {
+  const rij = w.addStack(); rij.centerAlignContent();
+  const maat = groot ? 58 : 46;
+  const img = rij.addImage(ringenAfbeelding(r, maat));
+  img.imageSize = new Size(maat, maat);
+  rij.addSpacer(10);
+  const kol = rij.addStack(); kol.layoutVertically(); kol.spacing = 1;
+  const regel = (kleurR, naam, v, doel, eenheid) => {
+    const st = kol.addStack(); st.centerAlignContent();
+    label(st, naam + " ", 10, zacht);
+    label(st, Math.round(v) + "/" + doel + " " + eenheid, 11, kleurR, "semi");
+  };
+  regel(ringKleur.beweeg, "Beweeg", r.beweeg, RING_BEWEEG, "kcal");
+  regel(ringKleur.training, "Training", r.training, RING_TRAINING, "min");
+  regel(ringKleur.staan, "Staan", r.staan, RING_STAAN, "u");
+  rij.addSpacer();
+  const rechts = rij.addStack(); rechts.layoutVertically();
+  label(rechts, "Stappen", 9, zacht);
+  label(rechts, Math.round(r.stappen).toLocaleString("nl-NL"), 13, tekst, "semi");
+  if (r.laatst) {
+    const t = new Date(String(r.laatst).replace(" ", "T").replace(/\+00$/, "+00:00"));
+    const df = new DateFormatter(); df.dateFormat = "HH:mm";
+    label(rechts, "live · " + df.string(t), 8, zacht);
+  }
+}
+
 function weekStrip(w, d) {
   if (!d.week_dagen.length) return;
   const rij = w.addStack(); rij.spacing = 4;
@@ -189,7 +283,7 @@ function bouwWidget(d, size) {
   const w = new ListWidget();
   w.backgroundColor = achtergrond;
   w.url = DASHBOARD;
-  w.refreshAfterDate = new Date(Date.now() + 30 * 60 * 1000);
+  w.refreshAfterDate = new Date(Date.now() + 15 * 60 * 1000);
   const c = kleur[d.status] || kleur.onbekend;
 
   if (size === "small") {
@@ -211,7 +305,7 @@ function bouwWidget(d, size) {
     w.addSpacer(6);
     vitalsRij(w, d, false);
     w.addSpacer(6);
-    weekBlok(w, d, 88);
+    if (d.ringen) ringenBlok(w, d.ringen, false); else weekBlok(w, d, 88);
     return w;
   }
 
@@ -221,14 +315,12 @@ function bouwWidget(d, size) {
   w.addSpacer(6);
   scoreEnTraining(w, d, c, 16, 2);
   w.addSpacer(6);
-  onderdelenBlok(w, d, 5);
-  w.addSpacer(8);
+  onderdelenBlok(w, d, 4);
+  w.addSpacer(6);
   vitalsRij(w, d, true);
-  w.addSpacer(8);
-  label(w, "Deze week", 9, zacht, "semi");
-  w.addSpacer(3);
-  weekBlok(w, d, 92);
-  w.addSpacer(8);
+  w.addSpacer(6);
+  if (d.ringen) ringenBlok(w, d.ringen, true); else weekBlok(w, d, 92);
+  w.addSpacer(6);
   weekStrip(w, d);
   w.addSpacer(8);
   dagInfo(w, d);
@@ -250,7 +342,9 @@ function foutWidget(msg) {
 let widget;
 const size = config.widgetFamily || "large";
 try {
-  widget = bouwWidget(await laadSamenvatting(), size);
+  const d = await laadSamenvatting();
+  try { d.ringen = await laadRingen(); } catch (e) { d.ringen = null; }
+  widget = bouwWidget(d, size);
 } catch (e) {
   widget = foutWidget("Kon de gegevens niet laden: " + e.message);
 }

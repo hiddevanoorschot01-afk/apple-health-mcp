@@ -252,6 +252,22 @@ def main():
     # ---- daily metrics (local day)
     by_day = defaultdict(lambda: defaultdict(list))
     hr_hourly, resp_hourly = [], []
+    # The same hour can arrive twice under different source labels ("Apple Watch" and
+    # "Apple Watch|iPhone"), or as a partial and a later full sample. For metrics that are
+    # summed per day, keep one value per hour: the largest.
+    SUMMED = {"active_energy", "step_count", "dietary_energy", "protein", "apple_exercise_time", "apple_stand_hour"}
+    best = {}
+    rest = []
+    for m in metrics:
+        if m["metric_name"] in SUMMED:
+            hour = local(parse_ts(m["date"])).replace(minute=0, second=0, microsecond=0)
+            key = (m["metric_name"], hour)
+            q = num(m["qty"])
+            if key not in best or (q or 0) > (num(best[key]["qty"]) or 0):
+                best[key] = m
+        else:
+            rest.append(m)
+    metrics = rest + list(best.values())
     for m in metrics:
         name = m["metric_name"]
         t = local(parse_ts(m["date"]))
