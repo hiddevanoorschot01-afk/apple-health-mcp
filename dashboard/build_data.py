@@ -233,7 +233,7 @@ def main():
     since = (today - timedelta(days=args.days)).isoformat()
 
     metrics = health_sql(args.url, f"""
-        select metric_name, date, qty, avg, extra from metric_samples
+        select metric_name, date, qty, min, avg, extra from metric_samples
         where date >= '{since}' and metric_name in (
           'heart_rate_variability','resting_heart_rate','sleep_analysis','vo2_max',
           'active_energy','step_count','respiratory_rate','apple_sleeping_wrist_temperature',
@@ -287,7 +287,9 @@ def main():
             by_day[t.date()]["hrv_all"].append(q)
         elif name == "heart_rate":
             if q is not None:
-                hr_hourly.append((t, q))
+                # Keep the hour's lowest value too: Apple's sleeping heart rate (Vitals)
+                # follows the hourly minimum while asleep, not the hourly average.
+                hr_hourly.append((t, num(m.get("min")) or q))
         elif name == "respiratory_rate":
             if q is not None:
                 resp_hourly.append((t, q))
@@ -374,7 +376,8 @@ def main():
         ends = [x.get("sleepEnd") or x.get("inBedEnd") for x in sl if x.get("sleepEnd") or x.get("inBedEnd")]
         if starts and ends:
             s0, s1 = parse_ts(min(starts)), parse_ts(max(ends))
-            # Only hours that lie fully inside the sleep window; the median keeps a restless hour from dominating.
+            # Only hours that lie fully inside the sleep window; the median keeps a restless hour from
+            # dominating. Sleeping HR uses the hourly minimum, which matches Apple's Vitals value.
             hv = [v for (tt, v) in hr_hourly if s0 <= tt and tt + timedelta(hours=1) <= s1]
             rv = [v for (tt, v) in resp_hourly if s0 <= tt and tt + timedelta(hours=1) <= s1]
             slaap_hr = statistics.median(hv) if hv else None
@@ -426,13 +429,13 @@ def main():
         # Sleep score (0-100), built like Apple's: duration 50, bedtime regularity 30, interruptions 20.
         # Calibrated to Apple's own score (a 5 h 40 night with a regular bedtime scores ~80):
         # duration counts from 2 h (0) to 7.5 h (full); bedtime within 45 min of your usual
-        # time is full; up to 15 min awake is full.
+        # time is full; up to 10 min awake is full, 0 from 50 min (about 30 min awake gives ~10).
         row.update({"slaapscore": None, "slaap_duur_pt": None, "slaap_bedtijd_pt": None, "slaap_onderbreking_pt": None,
                     "bedtijd": None, "wakker_min": None})
         if row["slaap_u"]:
             duur = 50 * clamp((row["slaap_u"] - 2) / 5.5)
             awake = (row["wakker_u"] or 0) * 60
-            onder = 20 * clamp(1 - max(0.0, awake - 15) / 75)
+            onder = 20 * clamp(1 - max(0.0, awake - 10) / 40)
             prev_beds = [daily[j]["_bed_min"] for j in range(max(0, i - 14), i) if daily[j]["_bed_min"] is not None]
             bed = None
             if row["_bed_min"] is not None:
