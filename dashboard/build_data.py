@@ -421,31 +421,18 @@ def main():
         row["belasting_28d_per_week"] = r(chronic_week, 0)
         row["acwr"] = r(acute / chronic_week, 2) if chronic_week > 0 and span >= 21 else None
 
-        # Readiness (0-100): HRV vs baseline, resting HR vs baseline, last night's sleep, load spike.
-        score, parts = 60.0, 0
-        if row["hrv"] and row["hrv_basis"] and row["hrv_sd_ln"]:
-            zh = (math.log(row["hrv"]) - math.log(row["hrv_basis"])) / max(row["hrv_sd_ln"], 0.05)
-            score += max(min(zh, 2), -2.5) * 10
-            parts += 1
-        if row["rhr"] and row["rhr_basis"]:
-            score -= max(min(row["rhr"] - row["rhr_basis"], 8), -4) * 3
-            parts += 1
-        if row["slaap_u"]:
-            score += max(min((row["slaap_u"] - 7.5) * 8, 10), -20)
-            parts += 1
-        if row["acwr"] and row["acwr"] > 1.3:
-            score -= (row["acwr"] - 1.3) * 40
-        row["herstel"] = r(max(0, min(100, score)), 0) if parts >= 2 else None
-        del row["hrv_sd_ln"]
+        clamp = lambda v: max(0.0, min(1.0, v))
 
         # Sleep score (0-100), built like Apple's: duration 50, bedtime regularity 30, interruptions 20.
+        # Calibrated to Apple's own score (a 5 h 40 night with a regular bedtime scores ~80):
+        # duration counts from 2 h (0) to 7.5 h (full); bedtime within 45 min of your usual
+        # time is full; up to 15 min awake is full.
         row.update({"slaapscore": None, "slaap_duur_pt": None, "slaap_bedtijd_pt": None, "slaap_onderbreking_pt": None,
                     "bedtijd": None, "wakker_min": None})
         if row["slaap_u"]:
-            clamp = lambda v: max(0.0, min(1.0, v))
-            duur = 50 * clamp((row["slaap_u"] - 4) / 3.5)
+            duur = 50 * clamp((row["slaap_u"] - 2) / 5.5)
             awake = (row["wakker_u"] or 0) * 60
-            onder = 20 * clamp(1 - max(0.0, awake - 10) / 50)
+            onder = 20 * clamp(1 - max(0.0, awake - 15) / 75)
             prev_beds = [daily[j]["_bed_min"] for j in range(max(0, i - 14), i) if daily[j]["_bed_min"] is not None]
             bed = None
             if row["_bed_min"] is not None:
@@ -453,10 +440,35 @@ def main():
                 row["bedtijd"] = f"{(18 + bm // 60) % 24:02d}:{bm % 60:02d}"
                 if len(prev_beds) >= 3:
                     dev = abs(bm - statistics.median(prev_beds))
-                    bed = 30 * clamp(1 - max(0, dev - 30) / 90)
+                    bed = 30 * clamp(1 - max(0, dev - 45) / 135)
             total = duur + onder + bed if bed is not None else (duur + onder) / 70 * 100
             row.update({"slaapscore": r(total, 0), "slaap_duur_pt": r(duur, 0), "slaap_onderbreking_pt": r(onder, 0),
                         "slaap_bedtijd_pt": r(bed, 0), "wakker_min": r(awake, 0)})
+
+        # Readiness (0-100) as a sum of four parts, each against your own baseline:
+        #   HRV last night vs 28-day normal         max 30  (15 at normal, ±7.5 per SD)
+        #   sleeping heart rate vs 28-day normal     max 25  (full at or below normal, 0 at +6 bpm)
+        #   sleep score                              max 30  (sleep score × 0.3)
+        #   training load (7 vs 28 days)             max 15  (full up to ratio 1.3, 0 at 1.6)
+        # A missing part is left out and the total is scaled to 100.
+        shr_w = [daily[j]["slaap_hr"] for j in range(max(0, i - 28), i) if daily[j]["slaap_hr"] is not None]
+        row["slaap_hr_basis"] = r(statistics.median(shr_w)) if len(shr_w) >= 5 else None
+        sd = row.get("hrv_sd_ln")
+        delen = {}
+        if row["hrv"] and row["hrv_basis"] and sd:
+            zh = (math.log(row["hrv"]) - math.log(row["hrv_basis"])) / max(sd, 0.05)
+            delen["hrv"] = (30 * clamp((zh + 2) / 4), 30)
+        if row["slaap_hr"] is not None and row["slaap_hr_basis"] is not None:
+            delen["slaap_hr"] = (25 * clamp(1 - (row["slaap_hr"] - row["slaap_hr_basis"]) / 6), 25)
+        if row["slaapscore"] is not None:
+            delen["slaap"] = (row["slaapscore"] * 0.3, 30)
+        if row["acwr"] is not None:
+            delen["belasting"] = (15 * clamp(1 - (row["acwr"] - 1.3) / 0.3), 15)
+        for k in ("hrv", "slaap_hr", "slaap", "belasting"):
+            row[f"herstel_{k}_pt"] = r(delen[k][0], 0) if k in delen else None
+        row["herstel"] = (r(100 * sum(v for v, _ in delen.values()) / sum(m for _, m in delen.values()), 0)
+                          if len(delen) >= 2 and ("hrv" in delen or "slaap_hr" in delen) else None)
+        row.pop("hrv_sd_ln", None)
 
         # Morning status from the profile's rules (green / orange / red).
         temps = [daily[j]["pols_temp"] for j in range(max(0, i - 28), i) if daily[j]["pols_temp"] is not None]
@@ -476,7 +488,7 @@ def main():
         elif row["herstel"] is None:
             row["status"] = None
         elif ((row["slaap_hr"] is None or row["slaap_hr"] <= prof.get("slaaphr_groen_max", 45))
-              and (row["slaap_u"] or 0) >= prof.get("slaap_groen_min", 7.0) and row["herstel"] >= 55):
+              and (row["slaap_u"] or 0) >= prof.get("slaap_groen_min", 7.0) and row["herstel"] >= 60):
             row["status"] = "groen"
         elif row["herstel"] < 40:
             row["status"] = "rood"
@@ -605,6 +617,9 @@ def main():
         "slaap_u": t["slaap_u"] if t["slaap_u"] is not None else y.get("slaap_u"),
         "slaapscore": t["slaapscore"] if t["slaapscore"] is not None else y.get("slaapscore"),
         "slaap_hr": src.get("slaap_hr"), "adem": src.get("adem"), "adem_basis": src.get("adem_basis"),
+        "slaap_hr_basis": src.get("slaap_hr_basis"),
+        "herstel_hrv_pt": src.get("herstel_hrv_pt"), "herstel_slaap_hr_pt": src.get("herstel_slaap_hr_pt"),
+        "herstel_slaap_pt": src.get("herstel_slaap_pt"), "herstel_belasting_pt": src.get("herstel_belasting_pt"),
         "temp_afwijking": src.get("temp_afwijking"), "status_reden": reden,
         "kwaliteitsruns_deze_week": kwaliteit_deze_week, "lange_run_max_km": lange_max,
         "dagen_achter_elkaar_getraind": streak, "rustdag": rustdag,
