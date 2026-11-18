@@ -569,6 +569,8 @@ def main():
         titel = "Rustdag"
         tekst = ("Rood" + (f" ({reden})" if reden else "") + ": vandaag rust. Hooguit wandelen of mobiliteit. "
                  "Een gemiste sessie haal je niet in.")
+    elif rustdag:
+        titel, tekst = "Rustdag", "Vandaag is je vaste rustdag: geen training. Hooguit een wandeling als je daar zin in hebt."
     elif streak >= max_rij:
         titel, tekst = "Rustdag", f"Je hebt {streak} dagen achter elkaar getraind. Neem vandaag rust (maximaal {max_rij} dagen achter elkaar)."
     elif status == "oranje":
@@ -576,12 +578,8 @@ def main():
             titel, tekst = "Rustige duurloop", "Oranje: loop 30-45 minuten in zone 2 (onder 150 bpm, je moet kunnen praten). Geen tempo en geen zware benen."
         else:
             titel, tekst = "Upper body", "Oranje: train bovenlichaam (push of pull) en core. Spaar je benen en je knie voor je volgende loop."
-        if rustdag:
-            tekst = "Vandaag is je standaard rustdag; rust is ook prima. " + tekst
     else:
-        if rustdag:
-            titel, tekst = "Rustdag (gepland)", "Groen, maar vandaag is je standaard rustdag. Rust, of schuif hem als je daar deze week een reden voor hebt."
-        elif long_days is None or long_days >= 6:
+        if long_days is None or long_days >= 6:
             titel, tekst = "Lange duurloop", f"Groen: lange rustige loop in zone 2, maximaal {str(lange_max).replace('.', ',')} km (hooguit 1,5 km langer dan je langste loop van de laatste 4 weken). Stop of pas aan bij kniepijn boven 3/10."
         elif kwaliteit_deze_week < prof.get("max_kwaliteit_per_week", 1) and (hard_days is None or hard_days >= 3):
             titel, tekst = "Kwaliteitsrun", "Groen: je ene kwaliteitsrun van deze week, bijvoorbeeld intervallen rond racetempo. Laat 48 uur tussen dit en zware beentraining."
