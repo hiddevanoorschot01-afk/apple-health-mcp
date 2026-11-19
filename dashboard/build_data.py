@@ -253,16 +253,16 @@ def main():
     # ---- daily metrics (local day)
     by_day = defaultdict(lambda: defaultdict(list))
     hr_hourly, resp_hourly = [], []
-    # The same hour can arrive twice under different source labels ("Apple Watch" and
-    # "Apple Watch|iPhone"), or as a partial and a later full sample. For metrics that are
-    # summed per day, keep one value per hour: the largest.
+    # The same bucket can arrive twice under different source labels ("Apple Watch" and
+    # "Apple Watch|iPhone"), or as a partial and a later full value. For metrics that are
+    # summed per day, keep one value per exact timestamp (the largest) and sum the rest:
+    # with "since last sync" the buckets start at each sync time, so they must be added.
     SUMMED = {"active_energy", "step_count", "dietary_energy", "protein", "apple_exercise_time", "apple_stand_hour"}
     best = {}
     rest = []
     for m in metrics:
         if m["metric_name"] in SUMMED:
-            hour = local(parse_ts(m["date"])).replace(minute=0, second=0, microsecond=0)
-            key = (m["metric_name"], hour)
+            key = (m["metric_name"], parse_ts(m["date"]))
             q = num(m["qty"])
             if key not in best or (q or 0) > (num(best[key]["qty"]) or 0):
                 best[key] = m
@@ -298,7 +298,11 @@ def main():
             if q is not None:  # measured overnight; belongs to the morning it leads into
                 by_day[t.date() + timedelta(days=1) if t.hour >= 12 else t.date()]["pols_temp"].append(q)
         elif q is not None:
-            by_day[t.date()][name].append(q)
+            # Clock-aligned buckets (whole hours, from "Vandaag"/day exports) and buckets that start at a
+            # sync time ("since last sync") are kept apart; a day uses whichever adds up to more, so a
+            # day that saw both kinds is not counted twice.
+            off = name in SUMMED and (t.minute or t.second)
+            by_day[t.date()][name + "__off" if off else name].append(q)
 
     hr_rest_all = [v for d in by_day.values() for v in d.get("resting_heart_rate", []) if v]
     hr_rest = statistics.median(hr_rest_all) if hr_rest_all else 55.0
@@ -387,21 +391,24 @@ def main():
         fase = next((f for f in prof.get("voeding_fases", []) if f["van"] <= d.isoformat() <= f["tot"]), None)
         if b.get("vo2_max"):
             vo2_last = b["vo2_max"][-1]
-        kj = sum(b.get("active_energy", []))
+        def tot(name):
+            a, o = b.get(name) or [], b.get(name + "__off") or []
+            return max(sum(a), sum(o)) if (a or o) else None
+        kj = tot("active_energy") or 0
         daily.append({
             "datum": d.isoformat(), "hrv": r(hrv), "rhr": r(rhr), "slaap_u": r(sleep, 2),
             "diep_u": r(deep, 2), "rem_u": r(rem, 2), "kern_u": r(core, 2), "wakker_u": r(awake, 2),
             "vo2max": r(b["vo2_max"][-1], 1) if b.get("vo2_max") else None,
             "vo2max_laatst": r(vo2_last, 1),
-            "stappen": r(sum(b.get("step_count", [])), 0) if b.get("step_count") else None,
+            "stappen": r(tot("step_count"), 0),
             "actief_kcal": r(kj / 4.184, 0) if kj else None,
-            "training_min": r(sum(b["apple_exercise_time"]), 0) if b.get("apple_exercise_time") else None,
-            "staan_u": r(min(sum(b["apple_stand_hour"]), 24), 0) if b.get("apple_stand_hour") else None,
+            "training_min": r(tot("apple_exercise_time"), 0),
+            "staan_u": r(min(tot("apple_stand_hour"), 24), 0) if tot("apple_stand_hour") is not None else None,
             "belasting": r(load_by_day.get(d, 0.0), 0),
             "_bed_min": bed_min,
             "slaap_hr": r(slaap_hr), "adem": r(adem), "pols_temp": r(temp, 2),
-            "kcal": r(sum(b["dietary_energy"]) / 4.184, 0) if b.get("dietary_energy") else None,
-            "eiwit_g": r(sum(b["protein"]), 0) if b.get("protein") else None,
+            "kcal": r(tot("dietary_energy") / 4.184, 0) if tot("dietary_energy") else None,
+            "eiwit_g": r(tot("protein"), 0) if tot("protein") else None,
             "kcal_doel": fase["kcal"] if fase else None, "eiwit_doel": fase["eiwit"] if fase else None,
             "voedingsfase": fase["naam"] if fase else None,
             "gewicht_kg": r(weight, 1),
