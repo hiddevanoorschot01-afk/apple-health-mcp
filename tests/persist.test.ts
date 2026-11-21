@@ -77,4 +77,32 @@ describe("persist", () => {
     expect(rows).toHaveLength(1);
     expect(Number(rows[0].qty)).toBe(20);
   });
+
+  it("merges a night of sleep that arrives in pieces instead of overwriting it", async () => {
+    const db = await makeTestDb();
+    const send = (extra: Record<string, unknown>) => normalize({
+      data: { metrics: [{ name: "sleep_analysis", units: "hr", data: [{ date: "2026-11-19 00:00:00 +0100", source: "Watch", ...extra }] }],
+        workouts: [], ecg: [], stateOfMind: [], symptoms: [], medications: [], cycleTracking: [], heartRateNotifications: [] },
+    });
+    await persist(db, send({ sleepStart: "2026-11-18 22:26:00 +0100", sleepEnd: "2026-11-19 02:00:00 +0100", deep: 0.5, core: 2, rem: 0.8, awake: 0.1, totalSleep: 3.3 }));
+    await persist(db, send({ sleepStart: "2026-11-19 02:00:00 +0100", sleepEnd: "2026-11-19 06:15:00 +0100", deep: 0.4, core: 2.6, rem: 1.1, awake: 0.2, totalSleep: 4.1 }));
+    const rows = await db.select().from(metricSamples);
+    expect(rows).toHaveLength(1);
+    const ex = rows[0].extra as Record<string, number | string>;
+    expect(ex.sleepStart).toBe("2026-11-18 22:26:00 +0100");
+    expect(ex.sleepEnd).toBe("2026-11-19 06:15:00 +0100");
+    expect(ex.totalSleep).toBeCloseTo(7.4);
+  });
+
+  it("keeps the fuller sleep record when a re-sent piece overlaps it", async () => {
+    const db = await makeTestDb();
+    const send = (extra: Record<string, unknown>) => normalize({
+      data: { metrics: [{ name: "sleep_analysis", units: "hr", data: [{ date: "2026-11-19 00:00:00 +0100", source: "Watch", ...extra }] }],
+        workouts: [], ecg: [], stateOfMind: [], symptoms: [], medications: [], cycleTracking: [], heartRateNotifications: [] },
+    });
+    await persist(db, send({ sleepStart: "2026-11-18 22:26:00 +0100", sleepEnd: "2026-11-19 06:15:00 +0100", totalSleep: 7.4 }));
+    await persist(db, send({ sleepStart: "2026-11-19 04:04:00 +0100", sleepEnd: "2026-11-19 06:15:00 +0100", totalSleep: 2.1 }));
+    const ex = (await db.select().from(metricSamples))[0].extra as Record<string, number>;
+    expect(ex.totalSleep).toBe(7.4);
+  });
 });

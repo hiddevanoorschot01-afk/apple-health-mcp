@@ -1,4 +1,5 @@
 import { and, eq, sql } from "drizzle-orm";
+import { parseHaeDate } from "@/lib/hae-date";
 import { metricSamples, workouts, healthEvents } from "@/db/schema";
 import type { NormalizeResult } from "@/lib/ingest";
 
@@ -35,6 +36,48 @@ function chunk<T>(arr: T[], size: number): T[][] {
 // - workouts: ON CONFLICT (id) DO UPDATE (latest wins).
 // - health_events: delete existing rows matching (event_type,date,payload) then insert,
 //   since a portable jsonb-hash unique index isn't available across drivers.
+// Sleep arrives as one aggregated record per night (keyed by the wake-up date). With a
+// "since last sync" range Health Auto Export may send a night in pieces, each covering only
+// part of it. Merge instead of overwrite: pieces that do not overlap are added together
+// (earliest start, latest end, stage hours summed); overlapping ones keep the fuller piece.
+const SLEEP_SUMS = ["rem", "core", "deep", "awake", "asleep", "inBed", "totalSleep"] as const;
+
+function when(v: unknown): Date | null {
+  if (typeof v !== "string") return null;
+  try {
+    return parseHaeDate(v);
+  } catch {
+    return null;
+  }
+}
+
+export function mergeSleep(
+  oldExtra: Record<string, unknown> | null,
+  newExtra: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  if (!oldExtra) return newExtra;
+  if (!newExtra) return oldExtra;
+  const os = when(oldExtra.sleepStart), oe = when(oldExtra.sleepEnd);
+  const ns = when(newExtra.sleepStart), ne = when(newExtra.sleepEnd);
+  const total = (e: Record<string, unknown>) => (typeof e.totalSleep === "number" ? e.totalSleep : 0);
+  if (!os || !oe || !ns || !ne) return total(newExtra) >= total(oldExtra) ? newExtra : oldExtra;
+  const overlap = ns < oe && os < ne;
+  if (overlap) return total(newExtra) >= total(oldExtra) ? newExtra : oldExtra;
+  const first = os <= ns ? oldExtra : newExtra;
+  const last = os <= ns ? newExtra : oldExtra;
+  const merged: Record<string, unknown> = { ...last };
+  for (const k of SLEEP_SUMS) {
+    const a = typeof oldExtra[k] === "number" ? (oldExtra[k] as number) : 0;
+    const b = typeof newExtra[k] === "number" ? (newExtra[k] as number) : 0;
+    merged[k] = a + b;
+  }
+  merged.sleepStart = first.sleepStart;
+  merged.inBedStart = first.inBedStart ?? first.sleepStart;
+  merged.sleepEnd = last.sleepEnd;
+  merged.inBedEnd = last.inBedEnd ?? last.sleepEnd;
+  return merged;
+}
+
 export async function persist(db: Db, data: NormalizeResult): Promise<IngestSummary> {
   // One INSERT ... ON CONFLICT DO UPDATE may not touch the same row twice, so collapse
   // duplicate keys within a payload first (the later point wins).
@@ -43,6 +86,20 @@ export async function persist(db: Db, data: NormalizeResult): Promise<IngestSumm
     byKey.set(`${r.metricName}\u0000${r.date.toISOString()}\u0000${r.source ?? ""}`, r);
   }
   const metricRows = [...byKey.values()];
+  for (const r of metricRows) {
+    if (r.metricName !== "sleep_analysis" || r.source == null) continue;
+    const existing = await db
+      .select()
+      .from(metricSamples)
+      .where(
+        and(
+          eq(metricSamples.metricName, r.metricName),
+          eq(metricSamples.date, r.date),
+          eq(metricSamples.source, r.source),
+        ),
+      );
+    if (existing.length) r.extra = mergeSleep(existing[0].extra as Record<string, unknown> | null, r.extra);
+  }
   for (const batch of chunk(metricRows, METRIC_CHUNK)) {
     await db
       .insert(metricSamples)
